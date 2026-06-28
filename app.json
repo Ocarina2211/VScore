@@ -1,48 +1,51 @@
 {
   "expo": {
-    "name": "VScore",
-    "slug": "VScore",
-    "version": "1.0.0",
+    "name": "V-Score",
+    "slug": "vscore",
+    "version": "1.0.1",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
     "scheme": "vscore",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": true
-    },
-    "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
-      },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
-    },
-    "web": {
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
-    },
+    "icon": "./assets/images/Icone/newIcone.png",
     "plugins": [
-      "expo-router",
       [
-        "expo-splash-screen",
+        "expo-notifications",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#000000"
-          }
+          "icon": "./assets/images/Icone/newIcone.png",
+          "color": "#7B2FBE"
+        }
+      ],
+      "expo-localization",
+      "expo-apple-authentication",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.68957425502-q3csqeuus9d8qnrpicdd7c8knqno95a3"
         }
       ]
     ],
-    "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.jdecesco.vscore",
+      "buildNumber": "5",
+      "usesAppleSignIn": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSPhotoLibraryUsageDescription": "V-Score accesses your photo library so you can choose a profile picture to personalize your account.",
+        "NSCameraUsageDescription": "V-Score uses the camera so you can take a photo to set as your profile picture.",
+        "NSMicrophoneUsageDescription": "V-Score may access the microphone when recording a video for your profile picture."
+      }
+    },
+    "android": {
+      "package": "com.jdecesco.vscore",
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0D1A"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1d40d06f-9080-4052-bbc6-bd002bb1d635"
+      }
     }
   }
 }
