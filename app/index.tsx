@@ -1,12 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getLocales } from 'expo-localization';
-import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useEffect, useRef } from 'react';
 import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
 import { Language, TRANSLATIONS } from '../constants/translations';
+import { signInAsGuest } from '../services/auth';
 import { auth } from '../services/firebase';
+import { cancelAllScheduledNotificationsAsync, requestNotificationPermissionsAsync, scheduleNotificationAsync } from '../services/notifications';
 import { loadData, USER_KEYS } from '../services/storage';
 
 function resolveNotifLanguage(pref: string | null): Language {
@@ -19,7 +20,7 @@ function resolveNotifLanguage(pref: string | null): Language {
 
 async function scheduleInactivityReminder() {
   try {
-    const { status } = await Notifications.requestPermissionsAsync();
+    const { status } = await requestNotificationPermissionsAsync();
     if (status !== 'granted') return;
 
     const lastDateStr = await loadData(USER_KEYS.lastRatingDate);
@@ -30,9 +31,9 @@ async function scheduleInactivityReminder() {
       const lang = resolveNotifLanguage(await AsyncStorage.getItem('vscore_language'));
       const t = TRANSLATIONS[lang];
       // Cancel previous reminders then schedule new one
-      await Notifications.cancelAllScheduledNotificationsAsync();
+      await cancelAllScheduledNotificationsAsync();
       if (Platform.OS !== 'web') {
-        await Notifications.scheduleNotificationAsync({
+        await scheduleNotificationAsync({
           content: {
             title: t.notifTitle,
             body: t.notifBody,
@@ -48,45 +49,46 @@ export default function Index() {
   const router = useRouter();
   const opacity = useRef(new Animated.Value(0)).current;
   const fadeOut = useRef(new Animated.Value(1)).current;
-  const crystalScale = useRef(new Animated.Value(0.5)).current;
-  const titleY = useRef(new Animated.Value(20)).current;
-  const titleOpacity = useRef(new Animated.Value(0)).current;
+  const logoScale = useRef(new Animated.Value(0.5)).current;
   const xpWidth = useRef(new Animated.Value(0)).current;
-  const taglineOpacity = useRef(new Animated.Value(0)).current;
+  const dotsOpacity = useRef(new Animated.Value(0)).current;
+  const spinValue = useRef(new Animated.Value(0)).current;
+  const spinValue2 = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // Crystal appears
+    // Spinning circles (continuous)
+    Animated.loop(
+      Animated.timing(spinValue, { toValue: 1, duration: 3000, useNativeDriver: true, easing: (t) => t })
+    ).start();
+    Animated.loop(
+      Animated.timing(spinValue2, { toValue: 1, duration: 4500, useNativeDriver: true, easing: (t) => t })
+    ).start();
+
+    // Logo appears
     Animated.parallel([
-      Animated.spring(crystalScale, { toValue: 1, friction: 6, tension: 80, useNativeDriver: true }),
+      Animated.spring(logoScale, { toValue: 1, friction: 6, tension: 80, useNativeDriver: true }),
       Animated.timing(opacity, { toValue: 1, duration: 400, useNativeDriver: true }),
     ]).start();
 
     // Schedule inactivity reminder
     scheduleInactivityReminder();
 
-    // Title appears
-    setTimeout(() => {
-      Animated.parallel([
-        Animated.timing(titleOpacity, { toValue: 1, duration: 500, useNativeDriver: true }),
-        Animated.timing(titleY, { toValue: 0, duration: 500, useNativeDriver: true }),
-      ]).start();
-    }, 600);
-
     // XP bar fills
     setTimeout(() => {
-      Animated.timing(xpWidth, { toValue: 1, duration: 800, useNativeDriver: false }).start();
-    }, 1200);
+      Animated.timing(xpWidth, { toValue: 1, duration: 900, useNativeDriver: false }).start();
+    }, 700);
 
-    // Tagline
+    // Dots appear
     setTimeout(() => {
-      Animated.timing(taglineOpacity, { toValue: 1, duration: 400, useNativeDriver: true }).start();
-    }, 1800);
+      Animated.timing(dotsOpacity, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    }, 500);
 
     // Fade out and navigate
     const timer = setTimeout(() => {
       Animated.timing(fadeOut, { toValue: 0, duration: 500, useNativeDriver: true }).start(async () => {
+        const forceTutorialForTesting = false;
         const tutorialSeen = await loadData(USER_KEYS.tutorialSeen);
-        if (!tutorialSeen) { router.replace('/tutorial'); return; }
+        if (!tutorialSeen || forceTutorialForTesting) { router.replace('/tutorial'); return; }
         // Wait for Firebase Auth to be ready, then check if user is authenticated (non-anonymous)
         const user = await new Promise<import('firebase/auth').User | null>((resolve) => {
           const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -95,7 +97,12 @@ export default function Index() {
           });
         });
         if (!user) {
-          router.replace('/login');
+          try {
+            await signInAsGuest();
+            router.replace('/(tabs)');
+          } catch {
+            router.replace('/login');
+          }
           return;
         }
         // Anonymous users can browse games — route them to tabs too
@@ -106,31 +113,28 @@ export default function Index() {
     return () => clearTimeout(timer);
   }, []);
 
-  const xpBarWidth = xpWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '75%'] });
+  const xpBarWidth = xpWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '72%'] });
+  const spin = spinValue.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const spinReverse = spinValue2.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] });
 
   return (
     <Animated.View style={[styles.container, { opacity: fadeOut }]}>
-      {/* Crystal */}
-      <Animated.View style={[styles.crystalWrap, { opacity, transform: [{ scale: crystalScale }] }]}>
-        <View style={styles.crystalOuter}>
-          <View style={styles.crystalTop} />
-          <View style={styles.crystalBottom} />
-          <View style={styles.crystalShine} />
-          <Text style={styles.crystalV}>V</Text>
-        </View>
-        {/* Glow */}
+      {/* V + Rotating neon circle */}
+      <Animated.View style={[styles.logoWrap, { opacity, transform: [{ scale: logoScale }] }]}>
+        {/* Ambient glow */}
         <View style={styles.glow} />
-      </Animated.View>
-
-      {/* Title */}
-      <Animated.View style={{ opacity: titleOpacity, transform: [{ translateY: titleY }] }}>
-        <Text style={styles.title}>
-          V<Text style={styles.titlePurple}>-SCORE</Text>
-        </Text>
+        {/* Static base ring */}
+        <View style={styles.ringBase} />
+        {/* Spinning arc 1 */}
+        <Animated.View style={[styles.spinArc1, { transform: [{ rotate: spin }] }]} />
+        {/* Spinning arc 2 (reverse, slower) */}
+        <Animated.View style={[styles.spinArc2, { transform: [{ rotate: spinReverse }] }]} />
+        {/* V text */}
+        <Text style={styles.vLetter}>V</Text>
       </Animated.View>
 
       {/* XP Bar */}
-      <Animated.View style={[styles.xpSection, { opacity: titleOpacity }]}>
+      <Animated.View style={[styles.xpSection, { opacity }]}>
         <View style={styles.xpLabels}>
           <Text style={styles.xpLabel}>XP</Text>
           <Text style={styles.xpLabel}>LVL 1</Text>
@@ -140,13 +144,8 @@ export default function Index() {
         </View>
       </Animated.View>
 
-      {/* Tagline */}
-      <Animated.Text style={[styles.tagline, { opacity: taglineOpacity }]}>
-        LEVEL UP YOUR GAME
-      </Animated.Text>
-
       {/* Loading dots */}
-      <Animated.View style={[styles.dots, { opacity: taglineOpacity }]}>
+      <Animated.View style={[styles.dots, { opacity: dotsOpacity }]}>
         <View style={[styles.dot, { backgroundColor: '#A855F7' }]} />
         <View style={[styles.dot, { backgroundColor: '#C084FC' }]} />
         <View style={[styles.dot, { backgroundColor: '#EC4899' }]} />
@@ -163,71 +162,57 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 40,
   },
-  crystalWrap: {
+  logoWrap: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 30,
-  },
-  crystalOuter: {
-    width: 120,
-    height: 140,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  crystalTop: {
-    position: 'absolute',
-    top: 0,
-    width: 0,
-    height: 0,
-    borderLeftWidth: 60,
-    borderRightWidth: 60,
-    borderBottomWidth: 80,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderBottomColor: '#9333EA',
-  },
-  crystalBottom: {
-    position: 'absolute',
-    bottom: 0,
-    width: 120,
-    height: 60,
-    backgroundColor: '#7C3AED',
-  },
-  crystalShine: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: 0,
-    height: 0,
-    borderLeftWidth: 60,
-    borderBottomWidth: 80,
-    borderLeftColor: 'transparent',
-    borderBottomColor: 'rgba(240, 171, 252, 0.25)',
-  },
-  crystalV: {
-    position: 'absolute',
-    fontSize: 44,
-    fontWeight: '800',
-    color: 'white',
-    top: 42,
+    marginBottom: 40,
+    width: 220,
+    height: 220,
   },
   glow: {
     position: 'absolute',
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    backgroundColor: '#A855F7',
-    opacity: 0.08,
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: '#6D28D9',
+    opacity: 0.18,
   },
-  title: {
-    fontSize: 48,
-    fontWeight: '800',
-    color: 'white',
-    letterSpacing: 3,
-    marginBottom: 30,
+  ringBase: {
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    borderWidth: 1.5,
+    borderColor: '#2A1550',
   },
-  titlePurple: {
-    color: '#A855F7',
+  spinArc1: {
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    borderWidth: 3.5,
+    borderTopColor: '#A855F7',
+    borderRightColor: '#EC4899',
+    borderBottomColor: 'transparent',
+    borderLeftColor: 'transparent',
+  },
+  spinArc2: {
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    borderWidth: 2,
+    borderTopColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderBottomColor: '#C084FC',
+    borderLeftColor: '#7C3AED',
+  },
+  vLetter: {
+    fontSize: 110,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    includeFontPadding: false,
+    lineHeight: 115,
   },
   xpSection: {
     width: '100%',
@@ -256,22 +241,15 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: '#A855F7',
   },
-  tagline: {
-    fontSize: 11,
-    fontWeight: '400',
-    color: '#6B7280',
-    letterSpacing: 4,
-    marginTop: 10,
-  },
   dots: {
     flexDirection: 'row',
-    gap: 4,
+    gap: 8,
     position: 'absolute',
     bottom: 60,
   },
   dot: {
     width: 8,
     height: 8,
-    borderRadius: 2,
+    borderRadius: 4,
   },
 });

@@ -1,14 +1,27 @@
 import { RAWG_API_KEY, RAWG_BASE_URL } from '../constants/Games';
 
+// ─── In-memory response cache (5 min TTL) ────────────────────────────────────
+const _cache = new Map<string, { data: any; ts: number }>();
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function cachedFetch(url: string): Promise<any> {
+  const hit = _cache.get(url);
+  if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
+  const res = await fetch(url);
+  const data = await res.json();
+  _cache.set(url, { data, ts: Date.now() });
+  return data;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const fetchGames = async (page = 1, search = '', ordering = '-metacritic', metacriticOnly = false, pageSize = 20) => {
   const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
   const effectiveOrdering = search ? '' : ordering;
   const orderingParam = effectiveOrdering ? `&ordering=${effectiveOrdering}` : '';
   const metacriticParam = metacriticOnly ? '&metacritic=1-100' : '';
-  const res = await fetch(
+  const data = await cachedFetch(
     `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}${searchParam}${orderingParam}${metacriticParam}`
   );
-  const data = await res.json();
   const results = metacriticOnly
     ? (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 1000)
     : (data.results ?? []);
@@ -16,11 +29,8 @@ export const fetchGames = async (page = 1, search = '', ordering = '-metacritic'
 };
 
 export const fetchGameDetail = async (id: number, lang = 'en') => {
-  const res = await fetch(
-    `${RAWG_BASE_URL}/games/${id}?key=${RAWG_API_KEY}`,
-    { headers: { 'Accept-Language': lang } }
-  );
-  return await res.json();
+  const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}?key=${RAWG_API_KEY}&lang=${lang}`);
+  return data;
 };
 
 export const fetchRecentGames = async (page = 1, pageSize = 20) => {
@@ -28,10 +38,9 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   // Fetch a larger batch sorted by release date to allow client-side re-scoring
   const batchSize = pageSize * 3;
-  const res = await fetch(
+  const data = await cachedFetch(
     `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${batchSize}&page=${page}&dates=${oneYearAgo},${today}&ordering=-released`
   );
-  const data = await res.json();
   const raw = (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 5);
 
   // 70% recency (rank in release-sorted list) + 30% popularity (normalized added count)
@@ -46,30 +55,45 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
 };
 
 export const fetchGamesByGenre = async (genreSlug: string, page = 1, pageSize = 20) => {
-  const res = await fetch(
+  const data = await cachedFetch(
     `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}&genres=${genreSlug}&ordering=-metacritic`
   );
-  const data = await res.json();
   const results = data.results ?? [];
   return { results, nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchGamesByTag = async (tagSlug: string, page = 1, pageSize = 20) => {
-  const res = await fetch(
+  const data = await cachedFetch(
     `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}&tags=${tagSlug}&ordering=-metacritic`
   );
-  const data = await res.json();
   const results = data.results ?? [];
   return { results, nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchGameScreenshots = async (id: number): Promise<string[]> => {
   try {
-    const res = await fetch(`${RAWG_BASE_URL}/games/${id}/screenshots?key=${RAWG_API_KEY}`);
-    const data = await res.json();
+    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/screenshots?key=${RAWG_API_KEY}`);
     return (data.results ?? []).map((s: any) => s.image as string);
   } catch {
     return [];
+  }
+};
+
+export const fetchGameSteamUrl = async (id: number): Promise<string | null> => {
+  try {
+    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/stores?key=${RAWG_API_KEY}`);
+    const steamStore = (data.results ?? []).find((entry: any) => {
+      if (typeof entry?.url !== 'string') return false;
+      try {
+        const hostname = new URL(entry.url).hostname.toLowerCase();
+        return hostname === 'store.steampowered.com';
+      } catch {
+        return false;
+      }
+    });
+    return steamStore?.url ?? null;
+  } catch {
+    return null;
   }
 };
 
@@ -98,15 +122,13 @@ export const fetchGamesFiltered = async ({
   if (platformId) url += `&platforms=${platformId}`;
   if (tagSlug) url += `&tags=${tagSlug}`;
   if (dates) url += `&dates=${dates}`;
-  const res = await fetch(url);
-  const data = await res.json();
+  const data = await cachedFetch(url);
   return { results: data.results ?? [], nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchSimilarGames = async (id: number): Promise<any[]> => {
   try {
-    const res = await fetch(`${RAWG_BASE_URL}/games/${id}/suggested?key=${RAWG_API_KEY}&page_size=8`);
-    const data = await res.json();
+    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/suggested?key=${RAWG_API_KEY}&page_size=8`);
     return data.results ?? [];
   } catch {
     return [];
@@ -223,7 +245,22 @@ export const fetchRecommendedGames = async (
   };
   merged.sort((a, b) => scoreGame(b) - scoreGame(a));
 
-  return { results: merged.slice(0, 20), isPersonalized: true, genreLabel };
+  // Daily seed: changes every day, consistent within the day
+  const today = new Date();
+  const daySeed = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+  const pool = merged.slice(0, 40);
+  // Seeded shuffle of the pool so recommendations rotate daily
+  let seed = daySeed;
+  const seededRand = () => {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return (seed >>> 0) / 0x100000000;
+  };
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(seededRand() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  return { results: pool.slice(0, 20), isPersonalized: true, genreLabel };
 };
 
 /**

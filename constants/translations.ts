@@ -41,6 +41,16 @@ export type Translations = {
   loginErrorGeneric: string;
   loginErrorInvalidEmail: string;
   loginErrorTooManyRequests: string;
+  loginErrorCredentialAlreadyInUse: string;
+  profileGuestBannerText: string;
+  profileGuestBannerCta: string;
+  tutorialPromoTitle: string;
+  tutorialPromoSubtitle: string;
+  tutorialPromoBenefit1: string;
+  tutorialPromoBenefit2: string;
+  tutorialPromoBenefit3: string;
+  tutorialPromoCreateAccount: string;
+  tutorialPromoLater: string;
   loginForgotPassword: string;
   loginResetEmailSent: string;
   loginResetEmailSentMessage: string;
@@ -90,6 +100,17 @@ export type Translations = {
   settingsUsernameUpdated: string;
   settingsNotifBody: string;
 
+  // Steam
+  settingsSteamSection: string;
+  settingsSteamLink: string;
+  settingsSteamLinked: string;
+  settingsSteamUnlink: string;
+  settingsSteamIdPlaceholder: string;
+  settingsSteamIdHint: string;
+  settingsSteamConnect: string;
+  settingsSteamError: string;
+  settingsSteamSuccess: string;
+
   // Profile
   profileChangeUsername: string;
   profileChangeUsernameOnce: string;
@@ -105,7 +126,6 @@ export type Translations = {
   profileScoreDistribution: string;
   profileAvgScore: (avg: string) => string;
   profileCriteriaBreakdown: string;
-  profileBestGame: string;
   profileWorstGame: string;
   profileTop3Title: string;
   profileAllRankedTitle: string;
@@ -211,6 +231,7 @@ export type Translations = {
   gameAvgTime: string;
   gameDeveloper: string;
   gamePublisher: string;
+  gameViewOnSteam: string;
   gameCommunityRatings: string;
   gameAbout: string;
   gameScreenshots: string;
@@ -241,6 +262,7 @@ export type Translations = {
   rankReviewPlaceholder: string;
   rankCompletedLabel: string;
   rankCompletedBanner: string;
+  rankHoursLabel: string;
   notifTitle: string;
   notifBody: string;
   notifFriendRequestTitle: string;
@@ -321,6 +343,16 @@ const en: Translations = {
   loginErrorGeneric: 'An error occurred. Please try again.',
   loginErrorInvalidEmail: 'Invalid email address.',
   loginErrorTooManyRequests: 'Too many attempts. Please wait before trying again.',
+  loginErrorCredentialAlreadyInUse: 'This account is already registered. Please tap again to sign in.',
+  profileGuestBannerText: 'You\'re in guest mode. Create an account to save your progress and join the community.',
+  profileGuestBannerCta: 'Create an account',
+  tutorialPromoTitle: 'One last thing 🚀',
+  tutorialPromoSubtitle: 'You can explore V-Score as a guest, but creating a free account unlocks everything.',
+  tutorialPromoBenefit1: '💾  Save your progress across all devices',
+  tutorialPromoBenefit2: '👥  Compare scores with friends',
+  tutorialPromoBenefit3: '🏆  Climb the ranks and earn badges',
+  tutorialPromoCreateAccount: 'Create a free account',
+  tutorialPromoLater: 'Continue as guest',
   loginForgotPassword: 'Forgot password?',
   loginResetEmailSent: 'Email sent',
   loginResetEmailSentMessage: 'Check your inbox to reset your password. If you don\'t see it, check your spam folder.',
@@ -343,11 +375,11 @@ const en: Translations = {
 
   // Success
   successNewRank: 'New rank unlocked!',
-  successContinue: '← Continue',
+  successContinue: 'Continue',
   successTop3: 'Your game has been added to your Top 3!',
   successRatingSaved: 'Your rating has been saved to your profile!',
   successKeepRanking: 'Keep ranking to level up!',
-  successBack: '← Back',
+  successBack: 'Back',
 
   // Settings
   settingsTitle: 'Settings',
@@ -370,6 +402,17 @@ const en: Translations = {
   settingsUsernameUpdated: '✓ Username updated',
   settingsNotifBody: "You haven't rated a game in a few days. New releases are waiting for you!",
 
+  // Steam
+  settingsSteamSection: 'Gaming platforms',
+  settingsSteamLink: 'Link Steam account',
+  settingsSteamLinked: 'Steam connected',
+  settingsSteamUnlink: 'Unlink',
+  settingsSteamIdPlaceholder: 'Steam ID or profile URL',
+  settingsSteamIdHint: 'Find your Steam ID at steamid.io or paste your profile URL',
+  settingsSteamConnect: 'Connect',
+  settingsSteamError: 'Unable to find this Steam profile. Check the ID and try again.',
+  settingsSteamSuccess: '✓ Steam account linked!',
+
   // Profile
   profileChangeUsername: 'Change username',
   profileChangeUsernameOnce: 'You can change your username once every 30 days.',
@@ -383,7 +426,7 @@ const en: Translations = {
   profileCompleted: 'Completed',
   profileTotalXP: 'Total XP',
   profileScoreDistribution: 'Score distribution',
-  profileAvgScore: (avg) => `Avg. ${avg} / 10 ⭐`,
+  profileAvgScore: (avg) => `Avg. ${avg} / 5 ⭐`,
   profileCriteriaBreakdown: 'Criteria breakdown',
   profileBestGame: 'Best game',
   profileWorstGame: 'Worst rated',
@@ -401,7 +444,6 @@ const en: Translations = {
   profileCriteriaTitle: 'Taste profile',
   profileStrongest: 'Strength',
   profileWeakest: 'Weakness',
-  profileBestGame: 'Best rated',
   profileCompletionRate: 'Completion rate',
   profileSuggestionsTitle: 'For you',
   profileSuggestionsBecause: (genre) => `Because you like ${genre}`,
@@ -517,6 +559,7 @@ const en: Translations = {
   gameAvgTime: '⏱ Avg. time',
   gameDeveloper: '🏢 Developer',
   gamePublisher: '🏬 Publisher',
+  gameViewOnSteam: 'View on Steam',
   gameCommunityRatings: 'Community ratings',
   gameAbout: 'About',
   gameScreenshots: 'Screenshots',
@@ -547,6 +590,8 @@ const en: Translations = {
   rankReviewPlaceholder: 'Share your thoughts about this game...',
   rankCompletedLabel: 'I have completed this game',
   rankCompletedBanner: 'of VScore players have completed this game',
+  rankHoursLabel: 'Time played',
+  notifTitle: 'Time to rate a game',
   notifBody: 'New discoveries are waiting for you on VScore.',
   notifFriendRequestTitle: '👥 New friend request!',
   notifFriendRequestBody: (count) => `You have ${count} new friend request${count > 1 ? 's' : ''}.`,
@@ -626,6 +671,16 @@ const fr: Translations = {
   loginErrorGeneric: 'Une erreur est survenue. Réessaie.',
   loginErrorInvalidEmail: 'Adresse email invalide.',
   loginErrorTooManyRequests: 'Trop de tentatives. Attends avant de réessayer.',
+  loginErrorCredentialAlreadyInUse: 'Ce compte est déjà enregistré. Clique à nouveau pour t\'y connecter.',
+  profileGuestBannerText: 'Tu es en mode invité. Crée un compte pour sauvegarder ta progression et rejoindre la communauté.',
+  profileGuestBannerCta: 'Créer un compte',
+  tutorialPromoTitle: 'Encore une chose 🚀',
+  tutorialPromoSubtitle: 'Tu peux explorer V-Score en mode invité, mais créer un compte gratuit débloque tout.',
+  tutorialPromoBenefit1: '💾  Sauvegarde ta progression sur tous tes appareils',
+  tutorialPromoBenefit2: '👥  Compare tes scores avec tes amis',
+  tutorialPromoBenefit3: '🏆  Grimpe dans les rangs et gagne des badges',
+  tutorialPromoCreateAccount: 'Créer un compte gratuit',
+  tutorialPromoLater: 'Continuer en mode invité',
   loginForgotPassword: 'Mot de passe oublié ?',
   loginResetEmailSent: 'Email envoyé',
   loginResetEmailSentMessage: 'Consulte ta boîte mail pour réinitialiser ton mot de passe. Si tu ne le vois pas, vérifie ton dossier spam.',
@@ -648,11 +703,11 @@ const fr: Translations = {
 
   // Success
   successNewRank: 'Nouveau rang débloqué !',
-  successContinue: '← Continuer',
+  successContinue: 'Continuer',
   successTop3: 'Ton ajout au top 3 a bien été comptabilisé',
   successRatingSaved: 'Ta notation a bien été enregistrée sur ton profil !',
   successKeepRanking: 'Continue de noter pour monter en niveau !',
-  successBack: '← Retour',
+  successBack: 'Retour',
 
   // Settings
   settingsTitle: 'Réglages',
@@ -675,6 +730,17 @@ const fr: Translations = {
   settingsUsernameUpdated: '✓ Pseudo mis à jour',
   settingsNotifBody: "Tu n'as pas noté de jeu depuis quelques jours. De nouvelles sorties t'attendent !",
 
+  // Steam
+  settingsSteamSection: 'Plateformes de jeu',
+  settingsSteamLink: 'Lier un compte Steam',
+  settingsSteamLinked: 'Steam connecté',
+  settingsSteamUnlink: 'Délier',
+  settingsSteamIdPlaceholder: 'Steam ID ou URL du profil',
+  settingsSteamIdHint: 'Trouve ton Steam ID sur steamid.io ou colle ton URL de profil',
+  settingsSteamConnect: 'Connecter',
+  settingsSteamError: 'Impossible de trouver ce profil Steam. Vérifie l\'ID et réessaie.',
+  settingsSteamSuccess: '✓ Compte Steam lié !',
+
   // Profile
   profileChangeUsername: 'Changer de pseudo',
   profileChangeUsernameOnce: 'Tu peux modifier ton pseudo une fois tous les 30 jours.',
@@ -688,9 +754,8 @@ const fr: Translations = {
   profileCompleted: 'Terminés',
   profileTotalXP: 'XP total',
   profileScoreDistribution: 'Distribution des notes',
-  profileAvgScore: (avg) => `Moy. ${avg} / 10 ⭐`,
+  profileAvgScore: (avg) => `Moy. ${avg} / 5 ⭐`,
   profileCriteriaBreakdown: 'Par critère',
-  profileBestGame: 'Meilleur jeu',
   profileWorstGame: 'Pire note',
   profileTop3Title: 'Mon TOP 3 :',
   profileAllRankedTitle: 'Tous mes jeux notés :',
@@ -822,6 +887,7 @@ const fr: Translations = {
   gameAvgTime: '⏱ Durée moy.',
   gameDeveloper: '🏢 Développeur',
   gamePublisher: '🏬 Éditeur',
+  gameViewOnSteam: 'Voir sur Steam',
   gameCommunityRatings: 'Notes de la communauté',
   gameAbout: 'À propos',
   gameScreenshots: 'Screenshots',
@@ -852,6 +918,8 @@ const fr: Translations = {
   rankReviewPlaceholder: 'Partage ton avis sur ce jeu...',
   rankCompletedLabel: 'J\'ai terminé ce jeu',
   rankCompletedBanner: 'des joueurs VScore ont terminé ce jeu',
+  rankHoursLabel: 'Temps de jeu',
+  notifTitle: 'Il est temps de noter un jeu',
   notifBody: "De nouvelles découvertes t'attendent sur VScore.",
   notifFriendRequestTitle: "👥 Nouvelle demande d'ami !",
   notifFriendRequestBody: (count) => `Tu as ${count} nouvelle${count > 1 ? 's' : ''} demande${count > 1 ? 's' : ''} d'ami.`,

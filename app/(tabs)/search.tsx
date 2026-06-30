@@ -235,7 +235,7 @@ export default function SearchScreen() {
 
 const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background, paddingTop: 60 },
-  title: { fontSize: 44, fontWeight: '900', color: c.text, textAlign: 'center', fontFamily: 'Georgia', marginBottom: 20 },
+  title: { fontSize: 40, fontWeight: '900', color: c.text, textAlign: 'center', marginBottom: 20, letterSpacing: -1 },
   searchBar: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: c.backgroundSecondary,
@@ -261,7 +261,7 @@ const makeStyles = (c: any) => StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   metaText: { color: '#fff', fontSize: 13, fontWeight: '900' },
-  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10, fontFamily: 'Georgia' },
+  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10 },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingBottom: 100 },
   emptyTitle: { color: c.text, fontSize: 20, fontWeight: '800' },
   emptySubtitle: { color: c.textSecondary, fontSize: 14, textAlign: 'center', paddingHorizontal: 40 },

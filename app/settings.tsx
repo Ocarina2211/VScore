@@ -1,19 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as Notifications from 'expo-notifications';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { doc, setDoc } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { LanguagePref, useLanguage, useTranslation } from '../../contexts/I18nContext';
-import { ThemeMode, useTheme } from '../../contexts/ThemeContext';
-import { AuthProvider, deleteAccount, getAuthEmail, getAuthProvider, signOut } from '../../services/auth';
-import { auth, db } from '../../services/firebase';
-import { loadData, removeData, saveData, USER_KEYS } from '../../services/storage';
+import { Alert, Modal, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { LanguagePref, useLanguage, useResolvedLanguage, useTranslation } from '../contexts/I18nContext';
+import { ThemeMode, useTheme } from '../contexts/ThemeContext';
+import { AuthProvider, deleteAccount, getAuthEmail, getAuthProvider, signOut } from '../services/auth';
+import { auth, db } from '../services/firebase';
+import { cancelAllScheduledNotificationsAsync, getNotificationPermissionsAsync, registerPushTokenAsync, requestNotificationPermissionsAsync, scheduleNotificationAsync, unregisterPushTokenAsync } from '../services/notifications';
+import { getSteamPlayerName, parseSteamInput } from '../services/steam';
+import { loadData, removeData, saveData, USER_KEYS } from '../services/storage';
 
 export default function SettingsScreen() {
   const { themeMode, setThemeMode, colors } = useTheme();
   const t = useTranslation();
   const { languagePref, setLanguagePref } = useLanguage();
+  const resolvedLanguage = useResolvedLanguage();
   const router = useRouter();
   const styles = useMemo(() => makeStyles(colors), [colors]);
 
@@ -35,6 +37,11 @@ export default function SettingsScreen() {
   const [savingPseudo, setSavingPseudo] = useState(false);
   const [authProvider, setAuthProvider] = useState<AuthProvider>('anonymous');
   const [authEmail, setAuthEmail] = useState<string | null>(null);
+  const [steamId, setSteamId] = useState<string | null>(null);
+  const [steamName, setSteamName] = useState<string | null>(null);
+  const [steamModalVisible, setSteamModalVisible] = useState(false);
+  const [steamInput, setSteamInput] = useState('');
+  const [steamLoading, setSteamLoading] = useState(false);
 
   useEffect(() => {
     setAuthProvider(getAuthProvider());
@@ -55,37 +62,51 @@ export default function SettingsScreen() {
         setSavedPseudo(profile.pseudo);
       }
     });
+    // Load Steam link
+    loadData(USER_KEYS.steamId).then((data) => {
+      if (data?.steamId) {
+        setSteamId(data.steamId);
+        setSteamName(data.steamName ?? null);
+      }
+    });
   }, []);
 
   // Check & auto-enable notifications on first mount
   useFocusEffect(
     useCallback(() => {
-      Notifications.getPermissionsAsync().then(async ({ status }) => {
+      Promise.all([
+        getNotificationPermissionsAsync(),
+        loadData(USER_KEYS.notificationsEnabled),
+      ]).then(async ([{ status }, enabledPreference]) => {
         if (status === 'granted') {
-          setNotificationsEnabled(true);
+          const enabled = enabledPreference !== false;
+          setNotificationsEnabled(enabled);
+          if (enabled) await registerPushTokenAsync(resolvedLanguage);
         } else {
           // Request on first open
-          const { status: newStatus } = await Notifications.requestPermissionsAsync();
+          const { status: newStatus } = await requestNotificationPermissionsAsync();
           if (newStatus === 'granted') {
             setNotificationsEnabled(true);
+            await saveData(USER_KEYS.notificationsEnabled, true);
+            await registerPushTokenAsync(resolvedLanguage);
             await scheduleReminder();
           } else {
             setNotificationsEnabled(false);
           }
         }
       });
-    }, [])
+    }, [resolvedLanguage])
   );
 
   const scheduleReminder = async () => {
-    await Notifications.cancelAllScheduledNotificationsAsync();
-    await Notifications.scheduleNotificationAsync({
+    await cancelAllScheduledNotificationsAsync();
+    await scheduleNotificationAsync({
       content: {
         title: '🎮 V-Score',
         body: t.settingsNotifBody,
       },
       trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        type: 'timeInterval',
         seconds: 3 * 24 * 60 * 60,
         repeats: true,
       },
@@ -94,12 +115,16 @@ export default function SettingsScreen() {
 
   const handleToggleNotifications = async () => {
     if (notificationsEnabled) {
-      await Notifications.cancelAllScheduledNotificationsAsync();
+      await cancelAllScheduledNotificationsAsync();
+      await unregisterPushTokenAsync();
+      await saveData(USER_KEYS.notificationsEnabled, false);
       setNotificationsEnabled(false);
     } else {
-      const { status } = await Notifications.requestPermissionsAsync();
+      const { status } = await requestNotificationPermissionsAsync();
       if (status === 'granted') {
         setNotificationsEnabled(true);
+        await saveData(USER_KEYS.notificationsEnabled, true);
+        await registerPushTokenAsync(resolvedLanguage);
         await scheduleReminder();
       } else {
         Alert.alert(
@@ -141,10 +166,57 @@ export default function SettingsScreen() {
 
   const pseudoDirty = pseudo.trim() !== savedPseudo && pseudo.trim().length > 0;
 
+  const handleSteamConnect = async () => {
+    if (!steamInput.trim()) return;
+    setSteamLoading(true);
+    console.log('[Settings] Steam connect pressed, input:', steamInput);
+    try {
+      const resolvedId = await parseSteamInput(steamInput);
+      console.log('[Settings] resolvedId:', resolvedId);
+      if (!resolvedId) {
+        Alert.alert('', t.settingsSteamError);
+        setSteamLoading(false);
+        return;
+      }
+      const name = await getSteamPlayerName(resolvedId);
+      console.log('[Settings] Steam name:', name);
+      if (!name) {
+        Alert.alert('', t.settingsSteamError);
+        setSteamLoading(false);
+        return;
+      }
+      setSteamId(resolvedId);
+      setSteamName(name);
+      await saveData(USER_KEYS.steamId, { steamId: resolvedId, steamName: name });
+      setSteamModalVisible(false);
+      setSteamInput('');
+      Alert.alert('', t.settingsSteamSuccess);
+    } catch (e: any) {
+      console.error('[Settings] Steam connect error:', e?.message ?? e);
+      Alert.alert('', t.settingsSteamError);
+    }
+    setSteamLoading(false);
+  };
+
+  const handleSteamUnlink = () => {
+    Alert.alert('', 'Unlink Steam?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: t.settingsSteamUnlink,
+        style: 'destructive',
+        onPress: async () => {
+          setSteamId(null);
+          setSteamName(null);
+          await removeData(USER_KEYS.steamId);
+        },
+      },
+    ]);
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 120 }}>
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.push('/(tabs)/profile' as any)}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
           <Ionicons name="chevron-back" size={24} color={colors.text} />
         </TouchableOpacity>
       </View>
@@ -202,6 +274,12 @@ export default function SettingsScreen() {
                           removeData(USER_KEYS.lists),
                           removeData(USER_KEYS.lastRatingDate),
                           removeData(USER_KEYS.pseudoLastChanged),
+                          removeData(USER_KEYS.lastSeenRequestIds),
+                          removeData(USER_KEYS.lastSeenFriendUids),
+                          removeData(USER_KEYS.lastSeenSentUids),
+                          removeData(USER_KEYS.lastSeenFriendActivityAt),
+                          removeData(USER_KEYS.lastAppOpenAt),
+                          removeData(USER_KEYS.steamId),
                         ]);
                         router.replace('/login');
                       },
@@ -230,6 +308,12 @@ export default function SettingsScreen() {
                             removeData(USER_KEYS.lists),
                             removeData(USER_KEYS.lastRatingDate),
                             removeData(USER_KEYS.pseudoLastChanged),
+                            removeData(USER_KEYS.lastSeenRequestIds),
+                            removeData(USER_KEYS.lastSeenFriendUids),
+                            removeData(USER_KEYS.lastSeenSentUids),
+                            removeData(USER_KEYS.lastSeenFriendActivityAt),
+                            removeData(USER_KEYS.lastAppOpenAt),
+                            removeData(USER_KEYS.steamId),
                           ]);
                           router.replace('/login');
                         } catch (e: any) {
@@ -245,6 +329,30 @@ export default function SettingsScreen() {
                 <Text style={styles.deleteAccountText}>{t.settingsDeleteAccount}</Text>
               </TouchableOpacity>
             </>
+          )}
+        </View>
+      </View>
+
+      {/* Steam / Gaming platforms */}
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>{t.settingsSteamSection}</Text>
+        <View style={styles.card}>
+          {steamId ? (
+            <View style={styles.steamLinkedRow}>
+              <Ionicons name="logo-steam" size={22} color="#1b2838" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowLabel}>{t.settingsSteamLinked}</Text>
+                {steamName && <Text style={styles.rowSub}>{steamName}</Text>}
+              </View>
+              <TouchableOpacity onPress={handleSteamUnlink}>
+                <Text style={styles.steamUnlinkText}>{t.settingsSteamUnlink}</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.steamBtn} onPress={() => setSteamModalVisible(true)}>
+              <Ionicons name="logo-steam" size={20} color="#FFFFFF" />
+              <Text style={styles.steamBtnText}>{t.settingsSteamLink}</Text>
+            </TouchableOpacity>
           )}
         </View>
       </View>
@@ -337,6 +445,33 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      {/* Steam Modal */}
+      <Modal visible={steamModalVisible} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Steam</Text>
+            <TextInput
+              style={styles.steamInput}
+              value={steamInput}
+              onChangeText={setSteamInput}
+              placeholder={t.settingsSteamIdPlaceholder}
+              placeholderTextColor={colors.textSecondary}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Text style={styles.steamHint}>{t.settingsSteamIdHint}</Text>
+            <View style={styles.modalBtns}>
+              <TouchableOpacity style={styles.modalCancelBtn} onPress={() => { setSteamModalVisible(false); setSteamInput(''); }}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalConnectBtn} onPress={handleSteamConnect} disabled={steamLoading}>
+                <Text style={styles.modalConnectText}>{steamLoading ? '...' : t.settingsSteamConnect}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* À propos */}
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>{t.settingsAbout}</Text>
@@ -363,7 +498,7 @@ const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background, paddingTop: 60 },
   topBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, marginBottom: 8 },
   backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: c.backgroundSecondary, alignItems: 'center', justifyContent: 'center' },
-  title: { fontSize: 44, fontWeight: '900', color: c.text, textAlign: 'center', fontFamily: 'Georgia', letterSpacing: 1 },
+  title: { fontSize: 40, fontWeight: '900', color: c.text, textAlign: 'center', letterSpacing: -1 },
   divider: { height: 1, backgroundColor: c.primaryLight, marginHorizontal: 20, marginVertical: 14 },
   section: { marginHorizontal: 16, marginTop: 24 },
   sectionLabel: { color: c.textSecondary, fontSize: 12, fontWeight: '800', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 },
@@ -415,4 +550,28 @@ const makeStyles = (c: any) => StyleSheet.create({
   infoRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 14, paddingHorizontal: 16 },
   infoLabel: { color: c.textSecondary, fontSize: 14 },
   infoValue: { color: c.text, fontSize: 14, fontWeight: '600' },
+
+  // Steam
+  steamLinkedRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  steamUnlinkText: { color: '#E74C3C', fontSize: 13, fontWeight: '600' },
+  steamBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+    backgroundColor: '#1b2838', borderRadius: 12, paddingVertical: 12,
+  },
+  steamBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 14 },
+  steamInput: {
+    backgroundColor: c.background, borderRadius: 12, padding: 14,
+    color: c.text, fontSize: 15, marginTop: 12,
+  },
+  steamHint: { color: c.textSecondary, fontSize: 11, marginTop: 8 },
+
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  modalCard: { backgroundColor: c.backgroundSecondary, borderRadius: 20, padding: 24, width: '100%' },
+  modalTitle: { color: c.text, fontSize: 20, fontWeight: '800', textAlign: 'center' },
+  modalBtns: { flexDirection: 'row', gap: 12, marginTop: 16 },
+  modalCancelBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: c.background },
+  modalCancelText: { color: c.textSecondary, fontWeight: '600' },
+  modalConnectBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: '#1b2838' },
+  modalConnectText: { color: '#FFFFFF', fontWeight: '700' },
 });

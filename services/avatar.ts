@@ -4,10 +4,16 @@ import { app } from './firebase';
 const storage = getStorage(app);
 
 export async function uploadAvatarAsync(uri: string, uid: string): Promise<string> {
-  // Fonctionne sur Expo Go, bare et web : fetch(uri) -> blob
-  const response = await fetch(uri);
-  const blob = await response.blob();
+  // XHR is the most reliable way to read a file:// URI as a Blob on React Native bare workflow
+  const blob: Blob = await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => resolve(xhr.response as Blob);
+    xhr.onerror = () => reject(new Error('XHR blob fetch failed'));
+    xhr.responseType = 'blob';
+    xhr.open('GET', uri, true);
+    xhr.send(null);
+  });
   const storageRef = ref(storage, `avatars/${uid}.jpg`);
-  await uploadBytes(storageRef, blob);
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
   return await getDownloadURL(storageRef);
 }

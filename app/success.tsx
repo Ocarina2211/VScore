@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Animated, Easing, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { RANKS } from '../constants/Games';
 import { useTranslation } from '../contexts/I18nContext';
@@ -29,6 +29,9 @@ export default function SuccessScreen() {
   const isTop3 = addedToTop3 === 'true';
   const newRankName = typeof levelUp === 'string' ? decodeURIComponent(levelUp) : '';
   const newRank = RANKS.find((r) => r.name === newRankName) ?? null;
+  const closeSuccessScreen = useCallback(() => {
+    router.replace('/(tabs)/rank' as any);
+  }, [router]);
 
   // Badge entrance
   const badgeScale = useRef(new Animated.Value(0)).current;
@@ -41,6 +44,11 @@ export default function SuccessScreen() {
   const particleAnims = useRef(
     PARTICLES.map(() => ({ progress: new Animated.Value(0) }))
   ).current;
+
+  useEffect(() => {
+    const autoCloseTimer = setTimeout(closeSuccessScreen, 3000);
+    return () => clearTimeout(autoCloseTimer);
+  }, [closeSuccessScreen]);
 
   useEffect(() => {
     if (!newRank) return;
@@ -131,7 +139,7 @@ export default function SuccessScreen() {
           <Text style={styles.rankSub}>{t.successNewRank}</Text>
         </Animated.View>
 
-        <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/rank' as any)}>
+        <TouchableOpacity style={styles.btn} onPress={closeSuccessScreen}>
           <Text style={styles.btnText}>{t.successContinue}</Text>
         </TouchableOpacity>
       </View>
@@ -151,7 +159,7 @@ export default function SuccessScreen() {
         )}
       </View>
 
-      <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)/rank' as any)}>
+      <TouchableOpacity style={styles.btn} onPress={closeSuccessScreen}>
         <Text style={styles.btnText}>{t.successBack}</Text>
       </TouchableOpacity>
     </View>
@@ -173,4 +181,3 @@ const makeStyles = (c: any) => StyleSheet.create({
   rankName: { fontSize: 34, fontWeight: '900', letterSpacing: 5, textAlign: 'center' },
   rankSub: { color: c.textSecondary, fontSize: 14, textAlign: 'center', marginTop: 4 },
 });
-

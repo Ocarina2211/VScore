@@ -2,16 +2,16 @@
   "expo": {
     "name": "V-Score",
     "slug": "vscore",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "scheme": "vscore",
     "userInterfaceStyle": "automatic",
-    "icon": "./assets/images/Icone/newIcone.png",
+    "icon": "./assets/images/Icone/IconeDef.png",
     "plugins": [
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/Icone/newIcone.png",
+          "icon": "./assets/images/Icone/IconeDef.png",
           "color": "#7B2FBE"
         }
       ],
@@ -22,13 +22,21 @@
         {
           "iosUrlScheme": "com.googleusercontent.apps.68957425502-q3csqeuus9d8qnrpicdd7c8knqno95a3"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-router",
+      "expo-web-browser"
     ],
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.jdecesco.vscore",
-      "buildNumber": "5",
+      "buildNumber": "7",
       "usesAppleSignIn": true,
+      "entitlements": {
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)$(CFBundleIdentifier)"
+        ]
+      },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSPhotoLibraryUsageDescription": "V-Score accesses your photo library so you can choose a profile picture to personalize your account.",
@@ -46,6 +54,11 @@
       "eas": {
         "projectId": "1d40d06f-9080-4052-bbc6-bd002bb1d635"
       }
+    },
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#07071A"
     }
   }
 }

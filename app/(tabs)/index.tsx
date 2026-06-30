@@ -132,7 +132,6 @@ export default function HomeScreen() {
   const loadedRef = useRef<Set<string>>(new Set());
   const nextPageRef = useRef<Record<string, number | null>>({});
   const loadingMoreRef = useRef<Set<string>>(new Set());
-  const friendsLastLoadRef = useRef(0);
   const recommendedLastCountRef = useRef(-1);
   const filterVersionRef = useRef(0);
   const activeFiltersRef = useRef({ genre: '', platform: 0, tag: '', recent: false });
@@ -154,12 +153,11 @@ export default function HomeScreen() {
           }
         }
       });
-      // Load friends section at most once every 3 minutes
+      // Reload friends section on every focus (data changes as friends rate new games)
       const friendsDef = SECTION_DEFS.find((d) => d.id === 'friends_liked');
-      if (friendsDef && Date.now() - friendsLastLoadRef.current > 3 * 60 * 1000) {
+      if (friendsDef) {
         loadedRef.current.delete('friends_liked');
         loadSection(friendsDef);
-        friendsLastLoadRef.current = Date.now();
       }
       return () => {
         setQuery('');
@@ -547,13 +545,6 @@ export default function HomeScreen() {
                 );
               }}
             />
-            <LinearGradient
-              pointerEvents="none"
-              colors={[`${colors.background}00`, colors.background]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.scrollFade}
-            />
           </View>
         )}
       </View>
@@ -647,7 +638,11 @@ export default function HomeScreen() {
     return (
       <View style={styles.container}>
         <View style={styles.stickyHeader}>
-          <Text style={styles.title}>{t.discoverTitle}</Text>
+          <View style={styles.titleRow}>
+            <Text style={styles.titleStar} accessible={false}>✦</Text>
+            <Text style={styles.title}>{t.discoverTitle}</Text>
+            <Text style={styles.titleStar} accessible={false}>✦</Text>
+          </View>
           <View style={styles.divider} />
           {searchBar}
         </View>
@@ -684,7 +679,11 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.stickyHeader}>
-        <Text style={styles.title}>{t.discoverTitle}</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.titleStar} accessible={false}>✦</Text>
+          <Text style={styles.title}>{t.discoverTitle}</Text>
+          <Text style={styles.titleStar} accessible={false}>✦</Text>
+        </View>
         <View style={styles.divider} />
         {searchBar}
       </View>
@@ -732,7 +731,24 @@ const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background, paddingTop: 60 },
   stickyHeader: { backgroundColor: c.background },
   header: {},
-  title: { fontSize: 48, fontWeight: '900', color: c.text, textAlign: 'center', fontFamily: 'Georgia', letterSpacing: 1 },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 18,
+  },
+  title: {
+    fontFamily: 'Nunito_700Bold',
+    fontSize: 44,
+    color: c.text,
+    textAlign: 'center',
+    letterSpacing: -0.5,
+  },
+  titleStar: {
+    color: c.primary,
+    fontSize: 18,
+    opacity: 0.75,
+  },
   divider: { height: 1, backgroundColor: c.primaryLight, marginHorizontal: 20, marginVertical: 14 },
   searchBar: {
     flexDirection: 'row', alignItems: 'center',
@@ -772,7 +788,7 @@ const makeStyles = (c: any) => StyleSheet.create({
   gridGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%' },
   gridMetaBadge: { position: 'absolute', top: 8, right: 8, width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   gridMetaText: { color: '#fff', fontSize: 13, fontWeight: '900' },
-  gridCardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10, fontFamily: 'Georgia' },
+  gridCardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10 },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingBottom: 100 },
   emptyTitle: { color: c.text, fontSize: 20, fontWeight: '800' },
   emptySubtitle: { color: c.textSecondary, fontSize: 14, textAlign: 'center', paddingHorizontal: 40 },
@@ -780,7 +796,6 @@ const makeStyles = (c: any) => StyleSheet.create({
   sectionTitle: { fontSize: 18, fontWeight: '800', color: c.text, marginLeft: 20, marginBottom: 12 },
   skeletonRow: { flexDirection: 'row', paddingLeft: 20, paddingRight: 10 },
   sectionPlaceholder: { height: 200 },
-  scrollFade: { position: 'absolute', right: 0, top: 0, bottom: 0, width: 48, pointerEvents: 'none' },
   row: { paddingLeft: 20, paddingRight: 10 },
   card: { width: 130, height: 180, marginRight: 12, borderRadius: 14, overflow: 'hidden', backgroundColor: c.backgroundSecondary },
   cover: { ...StyleSheet.absoluteFillObject, borderRadius: 14 },
@@ -828,7 +843,7 @@ const makeStyles = (c: any) => StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.5,
   },
-  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8, fontFamily: 'Georgia' },
+  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8 },
   cardFriends: { marginBottom: 28 },
   friendsLikedBadge: {
     position: 'absolute',

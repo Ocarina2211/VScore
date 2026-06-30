@@ -1,29 +1,35 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import { collection, doc, getDocFromServer, getDocsFromServer } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Image, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Alert, Image, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { captureRef } from 'react-native-view-shot';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AddFriendModal from '../../components/AddFriendModal';
 import RankModal from '../../components/RankModal';
 import UserProfileModal from '../../components/UserProfileModal';
 import { getNextRank, getRank } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { uploadAvatarAsync } from '../../services/avatar';
-import { getReceivedRequests, syncPublicProfile } from '../../services/community';
+import { getReceivedRequests, isPseudoTaken, syncPublicProfile } from '../../services/community';
 import { auth, db } from '../../services/firebase';
+import { fetchGames } from '../../services/rawg';
+import { getSteamOwnedGames, SteamGame } from '../../services/steam';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 
 
 
 
+const BUCKET_COLORS = ['#E74C3C', '#E67E22', '#F1C40F', '#2ECC71', '#00C853'];
+
 export default function ProfileScreen() {
   const colors = useColors();
   const t = useTranslation();
+  const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
   const CARD_SIZE = Math.floor((screenWidth - 32) / 2) - 6;
   const [xp, setXp] = useState(0);
@@ -45,6 +51,10 @@ export default function ProfileScreen() {
   const [shareCardVisible, setShareCardVisible] = useState(false);
   const [sharingImage, setSharingImage] = useState(false);
   const shareCardRef = useRef<View>(null);
+  const syncInitializedRef = useRef(false);
+  const [steamGames, setSteamGames] = useState<SteamGame[]>([]);
+  const [steamExpanded, setSteamExpanded] = useState(false);
+  const [steamLoading, setSteamLoading] = useState(false);
   const router = useRouter();
 
   // Version hybride : local + Firestore (restauration de l'ancien comportement)
@@ -101,8 +111,10 @@ export default function ProfileScreen() {
         try {
           const ratingsSnap = await getDocsFromServer(collection(db, 'ratings', user.uid, 'games'));
           if (!ratingsSnap.empty) {
+            const localRatings: any[] = (await loadData(USER_KEYS.ratings)) || [];
             const serverRatings = ratingsSnap.docs.map((d) => {
               const data = d.data();
+              const local = localRatings.find((r: any) => r.id === Number(d.id));
               return {
                 id: Number(d.id),
                 name: data.name ?? '',
@@ -114,7 +126,9 @@ export default function ProfileScreen() {
                 lifespan: data.lifespan ?? 0,
                 avg: data.avg ?? 0,
                 completed: data.completed ?? false,
-                comment: data.comment,
+                comment: data.comment ?? local?.comment,
+                hoursPlayed: data.hoursPlayed ?? local?.hoursPlayed ?? null,
+                ratedAt: local?.ratedAt,
                 synced: true,
               };
             });
@@ -154,6 +168,18 @@ export default function ProfileScreen() {
           if (active) setPendingRequests(reqs.length);
         } catch {}
         if (active) await loadProfileData();
+        // Load Steam library
+        if (active) {
+          const steamData = await loadData(USER_KEYS.steamId);
+          if (steamData?.steamId) {
+            setSteamLoading(true);
+            try {
+              const games = await getSteamOwnedGames(steamData.steamId);
+              if (active) setSteamGames(games.sort((a, b) => b.playtime_forever - a.playtime_forever));
+            } catch {}
+            if (active) setSteamLoading(false);
+          }
+        }
       })();
       return () => { active = false; };
     }, [loadProfileData])
@@ -163,36 +189,38 @@ export default function ProfileScreen() {
   const nextRank = getNextRank(xp);
   const progress = nextRank ? (xp - rank.minXP) / (nextRank.minXP - rank.minXP) : 1;
 
-  // Stats
-  const completedCount = ratings.filter((r) => r.completed).length;
-  const avgScore = ratings.length > 0
-    ? ratings.reduce((sum, r) => sum + (r.general ?? 0), 0) / ratings.length
-    : 0;
+  // ─── Derived stats (memoized to avoid recomputing on every render) ────────
+  const {
+    completedCount, avgScore, criteriaAvgs, criteriaEntries, sortedCriteria,
+    strongestKey, weakestKey, completionRate, ratingBuckets, maxBucket,
+  } = useMemo(() => {
+    const completedCount = ratings.filter((r) => r.completed).length;
+    const avgScore = ratings.length > 0
+      ? ratings.reduce((sum, r) => sum + (r.general ?? 0), 0) / ratings.length
+      : 0;
+    const criteriaKeys = ['graphics', 'gameplay', 'story', 'lifespan'] as const;
+    const criteriaAvgs = criteriaKeys.reduce((acc, key) => {
+      const values = ratings.map((r) => r[key]).filter((v) => v != null);
+      acc[key] = values.length > 0 ? values.reduce((s: number, v: number) => s + v, 0) / values.length : 0;
+      return acc;
+    }, {} as Record<typeof criteriaKeys[number], number>);
+    const criteriaEntries = Object.entries(criteriaAvgs) as [typeof criteriaKeys[number], number][];
+    const sortedCriteria = [...criteriaEntries].sort(([, a], [, b]) => b - a);
+    const strongestKey = sortedCriteria[0]?.[0];
+    const weakestKey = sortedCriteria[sortedCriteria.length - 1]?.[0];
+    const completionRate = ratings.length > 0 ? Math.round((completedCount / ratings.length) * 100) : 0;
+    const ratingBuckets = new Array(5).fill(0);
+    ratings.forEach((r) => {
+      const score = Math.round(r.general ?? 0);
+      const bucket = Math.min(4, Math.max(0, score - 1));
+      ratingBuckets[bucket]++;
+    });
+    const maxBucket = Math.max(...ratingBuckets, 1);
+    return { completedCount, avgScore, criteriaAvgs, criteriaEntries, sortedCriteria, strongestKey, weakestKey, completionRate, ratingBuckets, maxBucket };
+  }, [ratings]);
 
-  // Criteria averages (for the taste profile section)
-  const criteriaKeys = ['graphics', 'gameplay', 'story', 'lifespan'] as const;
-  const criteriaAvgs = criteriaKeys.reduce((acc, key) => {
-    const values = ratings.map((r) => r[key]).filter((v) => v != null);
-    acc[key] = values.length > 0 ? values.reduce((s: number, v: number) => s + v, 0) / values.length : 0;
-    return acc;
-  }, {} as Record<typeof criteriaKeys[number], number>);
-  const criteriaEntries = Object.entries(criteriaAvgs) as [typeof criteriaKeys[number], number][];
-  const sortedCriteria = [...criteriaEntries].sort(([, a], [, b]) => b - a);
-  const strongestKey = sortedCriteria[0]?.[0];
-  const weakestKey = sortedCriteria[sortedCriteria.length - 1]?.[0];
   const criteriaColors: Record<string, string> = { graphics: '#9B59B6', gameplay: '#2ECC71', story: '#3498DB', lifespan: '#F39C12' };
-
-  const completionRate = ratings.length > 0 ? Math.round((completedCount / ratings.length) * 100) : 0;
-  const ratingBuckets = new Array(5).fill(0);
-  ratings.forEach((r) => {
-    const score = Math.round(r.general ?? 0);
-    const bucket = Math.min(4, Math.max(0, score - 1));
-    ratingBuckets[bucket]++;
-  });
-  const maxBucket = Math.max(...ratingBuckets, 1);
-  const bucketColors = [
-    '#E74C3C', '#E67E22', '#F1C40F', '#2ECC71', '#00C853',
-  ];
+  // ─────────────────────────────────────────────────────────────────────────
 
   const styles = useMemo(() => makeStyles(colors), [colors]);
 
@@ -206,25 +234,39 @@ export default function ProfileScreen() {
 
   // Pre-compute filtered ratings outside JSX
   const ratingQueryNorm = ratingQuery.trim().toLowerCase();
-  const sortedRatings = [...ratings].sort((a, b) => {
+  const sortedRatings = useMemo(() => [...ratings].sort((a, b) => {
     if (sortKey === 'score') return (b.general ?? 0) - (a.general ?? 0);
     if (sortKey === 'meta') return (b.metacritic ?? 0) - (a.metacritic ?? 0);
     if (sortKey === 'title') return (a.name ?? '').localeCompare(b.name ?? '');
     return (b.ratedAt ?? 0) - (a.ratedAt ?? 0); // date
-  });
-  const filteredRatings = ratingQueryNorm
-    ? sortedRatings.filter((g) => g.name?.toLowerCase().includes(ratingQueryNorm))
-    : sortedRatings;
+  }), [ratings, sortKey]);
+  const filteredRatings = useMemo(
+    () => ratingQueryNorm
+      ? sortedRatings.filter((g) => g.name?.toLowerCase().includes(ratingQueryNorm))
+      : sortedRatings,
+    [sortedRatings, ratingQueryNorm]
+  );
+
+  const [pseudoError, setPseudoError] = useState('');
 
   const savePseudo = async () => {
     const trimmed = editPseudoValue.trim();
     if (trimmed.length >= 2 && canChangePseudo) {
+      const uid = auth.currentUser?.uid ?? '';
+      const taken = await isPseudoTaken(trimmed, uid);
+      if (taken) {
+        setPseudoError('Ce pseudo est déjà pris.');
+        return;
+      }
       const now = Date.now();
       setPseudo(trimmed);
       setLastPseudoChange(now);
       const profile = (await loadData(USER_KEYS.profile)) || {};
       await saveData(USER_KEYS.profile, { ...profile, pseudo: trimmed, lastPseudoChange: now });
+      // Immediately sync new pseudo to Firestore
+      syncPublicProfile(trimmed, avatarUri, xp, top3, gameLists).catch(() => {});
     }
+    setPseudoError('');
     setPseudoModalVisible(false);
   };
 
@@ -259,26 +301,36 @@ export default function ProfileScreen() {
       quality: 0.7,
     });
     if (!result.canceled && result.assets[0]) {
-      let uri = result.assets[0].uri;
-      let finalAvatarUri = uri;
-      const uid = auth.currentUser?.uid;
-      if (uid && uri && uri.startsWith('file')) {
-        try {
-          finalAvatarUri = await uploadAvatarAsync(uri, uid);
-        } catch (e) {
-          // ignore upload error, fallback to local uri
-        }
+      const uri = result.assets[0].uri;
+      let finalAvatarUri: string;
+      try {
+        // Resize to 200x200 and encode as base64 — no Firebase Storage needed
+        const manipulated = await ImageManipulator.manipulateAsync(
+          uri,
+          [{ resize: { width: 200, height: 200 } }],
+          { compress: 0.6, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+        );
+        if (!manipulated.base64) throw new Error('base64 missing');
+        finalAvatarUri = `data:image/jpeg;base64,${manipulated.base64}`;
+      } catch (e) {
+        console.error('[Avatar] resize/encode failed:', e);
+        Alert.alert('Erreur', 'Impossible de traiter la photo. Réessaie.');
+        return;
       }
       setAvatarUri(finalAvatarUri);
       const profile = (await loadData(USER_KEYS.profile)) || {};
       await saveData(USER_KEYS.profile, { ...profile, avatarUri: finalAvatarUri });
-      // Always sync to Firestore
-      syncPublicProfile(profile?.pseudo ?? pseudo, finalAvatarUri, xp, top3);
+      await syncPublicProfile(profile?.pseudo ?? pseudo, finalAvatarUri, xp, top3, gameLists);
     }
   };
 
   // Synchronisation automatique Firestore à chaque changement critique
+  // Guard: skip the first render (initial default values would corrupt Firestore)
   useEffect(() => {
+    if (!syncInitializedRef.current) {
+      syncInitializedRef.current = true;
+      return;
+    }
     const sync = async () => {
       await syncPublicProfile(
         pseudo ?? 'PSEUDO',
@@ -300,7 +352,21 @@ export default function ProfileScreen() {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
+    <View style={styles.container}>
+      <LinearGradient
+        colors={[rank.color + '33', colors.background]}
+        pointerEvents="none"
+        style={styles.overscrollGradient}
+      />
+      <ScrollView
+        automaticallyAdjustContentInsets={false}
+        contentInsetAdjustmentBehavior="never"
+        contentContainerStyle={styles.scrollContent}
+        style={[
+          styles.scrollView,
+          { marginTop: -insets.top, backgroundColor: rank.color + '33' },
+        ]}
+      >
       <RankModal visible={rankModalVisible} currentXP={xp} onClose={() => setRankModalVisible(false)} />
       <AddFriendModal
         visible={addFriendModalVisible}
@@ -389,7 +455,7 @@ export default function ProfileScreen() {
                 <TextInput
                   style={styles.modalInput}
                   value={editPseudoValue}
-                  onChangeText={setEditPseudoValue}
+                  onChangeText={(v) => { setEditPseudoValue(v); setPseudoError(''); }}
                   maxLength={20}
                   autoCorrect={false}
                   autoFocus
@@ -398,6 +464,7 @@ export default function ProfileScreen() {
                   placeholder={t.profileNewUsername}
                   placeholderTextColor={colors.textSecondary}
                 />
+                {pseudoError ? <Text style={{ color: '#E74C3C', fontSize: 13, marginBottom: 8 }}>{pseudoError}</Text> : null}
                 <TouchableOpacity
                   style={[styles.modalBtn, editPseudoValue.trim().length < 2 && styles.modalBtnDisabled]}
                   onPress={savePseudo}
@@ -407,14 +474,14 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </>
             ) : null}
-            <TouchableOpacity style={styles.modalCancelBtn} onPress={() => setPseudoModalVisible(false)}>
+            <TouchableOpacity style={styles.modalCancelBtn} onPress={() => { setPseudoModalVisible(false); setPseudoError(''); }}>
               <Text style={styles.modalCancelText}>{t.profileClose}</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      <View style={styles.hero}>
+      <View style={[styles.hero, { paddingTop: 60 + insets.top }]}>
         <LinearGradient colors={[rank.color + '33', colors.background]} style={StyleSheet.absoluteFillObject} />
         <View style={styles.topBar}>
           <TouchableOpacity style={styles.iconBtn} onPress={shareProfil}>
@@ -432,7 +499,7 @@ export default function ProfileScreen() {
             <TouchableOpacity style={styles.addFriendBtn} onPress={() => setAddFriendModalVisible(true)}>
               <Text style={styles.addFriendText}>Add friends 👥+</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/(tabs)/settings' as any)}>
+            <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/settings' as any)}>
               <Ionicons name="settings-outline" size={22} color={colors.text} />
             </TouchableOpacity>
           </View>
@@ -493,19 +560,49 @@ export default function ProfileScreen() {
         </View>
       </View>
 
+      {/* Guest mode banner */}
+      {auth.currentUser?.isAnonymous && (
+        <TouchableOpacity
+          style={[styles.guestBanner, { backgroundColor: colors.primary + '22', borderColor: colors.primary }]}
+          onPress={() => router.push('/login' as any)}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="person-add-outline" size={18} color={colors.primary} style={{ marginRight: 8 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.guestBannerText, { color: colors.text }]}>{t.profileGuestBannerText}</Text>
+          </View>
+          <Text style={[styles.guestBannerCta, { color: colors.primary }]}>{t.profileGuestBannerCta} →</Text>
+        </TouchableOpacity>
+      )}
+
       <Text style={styles.top3SectionTitle}>{t.profileTop3Title}</Text>
       <View style={styles.top3Row}>
-        {top3.length === 0 ? (
-          <Text style={styles.emptyText}>{t.profileNoTop3}</Text>
-        ) : (
-          top3.map((game, i) => (
-            <TouchableOpacity key={i} style={styles.top3Card} onPress={() => router.push(`/rank/${game.id}` as any)} activeOpacity={0.85}>
-              <Image source={{ uri: game.background_image }} style={styles.top3Cover} />
-              <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.top3Gradient} />
-              <Text style={styles.top3Name} numberOfLines={2}>{game.name}</Text>
-            </TouchableOpacity>
-          ))
-        )}
+        {[0, 1, 2].map((i) => {
+          const game = top3[i];
+          if (game) {
+            return (
+              <TouchableOpacity key={i} style={styles.top3Card} onPress={() => router.push(`/rank/${game.id}` as any)} activeOpacity={0.85}>
+                <Image source={{ uri: game.background_image }} style={styles.top3Cover} />
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.top3Gradient} />
+                <Text style={styles.top3Name} numberOfLines={2}>{game.name}</Text>
+              </TouchableOpacity>
+            );
+          } else {
+            return (
+              <TouchableOpacity
+                key={i}
+                style={styles.top3Placeholder}
+                onPress={() => router.navigate('/(tabs)' as any)}
+                activeOpacity={0.6}
+                accessibilityRole="button"
+                accessibilityLabel={`${t.profileTop3Title} ${i + 1}`}
+              >
+                <Ionicons name="add" size={24} color={colors.textSecondary + '55'} />
+                <Text style={styles.top3PlaceholderNumber}>{i + 1}</Text>
+              </TouchableOpacity>
+            );
+          }
+        })}
       </View>
 
       <View style={styles.chartSection}>
@@ -519,13 +616,67 @@ export default function ProfileScreen() {
             <View style={styles.barTrack}>
               <View style={[styles.barFill, {
                 width: `${(count / maxBucket) * 100}%` as any,
-                backgroundColor: bucketColors[i],
+                backgroundColor: BUCKET_COLORS[i],
               }]} />
             </View>
             <Text style={styles.barCount}>{count > 0 ? count : ''}</Text>
           </View>
         ))}
       </View>
+
+      {/* Steam Library */}
+      {steamGames.length > 0 && (
+        <View style={styles.steamSection}>
+          <TouchableOpacity style={styles.steamHeader} onPress={() => setSteamExpanded(!steamExpanded)} activeOpacity={0.7}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Ionicons name="logo-steam" size={18} color={colors.text} />
+              <Text style={styles.steamTitle}>Steam ({steamGames.filter(g => !ratings.some(r => r.name?.toLowerCase() === g.name?.toLowerCase())).length})</Text>
+            </View>
+            <Ionicons name={steamExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textSecondary} />
+          </TouchableOpacity>
+          {steamExpanded && (
+            <View style={styles.steamList}>
+              {steamGames
+                .filter(g => !ratings.some(r => r.name?.toLowerCase() === g.name?.toLowerCase()))
+                .slice(0, 50)
+                .map((game) => (
+                  <View key={game.appid} style={styles.steamGameRow}>
+                    {game.img_icon_url ? (
+                      <Image source={{ uri: game.img_icon_url }} style={styles.steamGameIcon} />
+                    ) : (
+                      <View style={[styles.steamGameIcon, { backgroundColor: colors.background }]} />
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.steamGameName} numberOfLines={1}>{game.name}</Text>
+                      {game.playtime_forever > 0 && (
+                        <Text style={styles.steamGameTime}>{Math.round(game.playtime_forever / 60)}h</Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      style={styles.steamAddBtn}
+                      onPress={async () => {
+                        try {
+                          const { results } = await fetchGames(1, game.name, '', false, 5);
+                          const match = results.find((r: any) => r.name?.toLowerCase() === game.name?.toLowerCase()) || results[0];
+                          if (match) {
+                            router.push(`/game/${match.id}` as any);
+                          } else {
+                            Alert.alert('', 'Game not found on RAWG database.');
+                          }
+                        } catch {
+                          Alert.alert('', 'Search error.');
+                        }
+                      }}
+                    >
+                      <Ionicons name="add" size={20} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              {steamLoading && <Text style={styles.steamGameTime}>Loading...</Text>}
+            </View>
+          )}
+        </View>
+      )}
 
       <Text style={styles.sectionTitle}>{t.listSectionTitle}</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 8, paddingBottom: 4 }}>
@@ -641,12 +792,16 @@ export default function ProfileScreen() {
           })}
         </View>
       )}
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
 const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background },
+  scrollView: { flex: 1, backgroundColor: 'transparent' },
+  scrollContent: { paddingBottom: 100, backgroundColor: c.background },
+  overscrollGradient: { position: 'absolute', top: 0, left: 0, right: 0, height: 320 },
   hero: { paddingTop: 60, paddingBottom: 24, overflow: 'hidden' },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 24 },
   iconBtn: { width: 40, height: 40, borderRadius: 12, backgroundColor: c.backgroundSecondary, alignItems: 'center', justifyContent: 'center' },
@@ -703,15 +858,35 @@ const makeStyles = (c: any) => StyleSheet.create({
   highlightScoreBadge: { position: 'absolute', top: 8, right: 8, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10 },
   highlightScoreText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   highlightLabel: { position: 'absolute', bottom: 32, left: 8, right: 8, color: 'rgba(255,255,255,0.7)', fontSize: 10, fontWeight: '600' },
-  highlightName: { position: 'absolute', bottom: 8, left: 8, right: 8, color: '#fff', fontSize: 12, fontWeight: '700', fontFamily: 'Georgia' },
+  highlightName: { position: 'absolute', bottom: 8, left: 8, right: 8, color: '#fff', fontSize: 12, fontWeight: '700' },
   // Rest
   sectionTitle: { fontSize: 16, color: c.text, fontWeight: '700', marginLeft: 20, marginTop: 24, marginBottom: 12 },
   top3SectionTitle: { fontSize: 20, color: c.text, fontWeight: '800', marginLeft: 20, marginTop: 20, marginBottom: 12, letterSpacing: 0.3 },
+  guestBanner: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 16, marginTop: 12, padding: 14, borderRadius: 14, borderWidth: 1 },
+  guestBannerText: { fontSize: 13, lineHeight: 18 },
+  guestBannerCta: { fontSize: 13, fontWeight: '700', marginLeft: 8 },
   top3Row: { flexDirection: 'row', paddingHorizontal: 12, gap: 8 },
   top3Card: { flex: 1, borderRadius: 18, overflow: 'hidden', backgroundColor: c.backgroundSecondary, aspectRatio: 0.65 },
   top3Cover: { ...StyleSheet.absoluteFillObject },
   top3Gradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%' },
-  top3Name: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10, fontFamily: 'Georgia' },
+  top3Name: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10 },
+  top3Placeholder: {
+    flex: 1,
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: c.textSecondary + '44',
+    backgroundColor: c.backgroundSecondary + '33',
+    aspectRatio: 0.65,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  top3PlaceholderNumber: {
+    color: c.textSecondary + '55',
+    fontSize: 14,
+    fontWeight: '800',
+  },
   searchBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: c.backgroundSecondary, marginHorizontal: 16, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10, marginBottom: 12, gap: 8 },
   searchIconText: { fontSize: 16 },
   searchInput: { flex: 1, color: c.text, fontSize: 15 },
@@ -726,7 +901,7 @@ const makeStyles = (c: any) => StyleSheet.create({
   cardGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%' },
   metaBadge: { position: 'absolute', top: 8, right: 8, width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   metaText: { color: '#fff', fontSize: 12, fontWeight: '900' },
-  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8, fontFamily: 'Georgia' },
+  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8 },
   commentBubble: { position: 'absolute', bottom: 26, right: 8, width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: c.textSecondary, textAlign: 'center', marginVertical: 20, marginHorizontal: 20 },
 
@@ -742,7 +917,7 @@ const makeStyles = (c: any) => StyleSheet.create({
   listCardGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%' },
   listCardMeta: { position: 'absolute', top: 6, right: 6, width: 30, height: 30, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
   listCardMetaText: { color: '#fff', fontSize: 11, fontWeight: '900' },
-  listCardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 10, fontWeight: '700', padding: 6, fontFamily: 'Georgia' },
+  listCardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 10, fontWeight: '700', padding: 6 },
 
   // Share card modal
   shareOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center', padding: 24 },
@@ -802,5 +977,16 @@ const makeStyles = (c: any) => StyleSheet.create({
   suggGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '55%' },
   suggMeta: { position: 'absolute', top: 8, right: 8, width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   suggMetaText: { color: '#fff', fontSize: 11, fontWeight: '900' },
-  suggName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 10, fontWeight: '700', padding: 8, fontFamily: 'Georgia' },
+  suggName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 10, fontWeight: '700', padding: 8 },
+
+  // Steam library
+  steamSection: { marginHorizontal: 20, marginTop: 18 },
+  steamHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: c.backgroundSecondary, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12 },
+  steamTitle: { color: c.text, fontSize: 14, fontWeight: '700' },
+  steamList: { marginTop: 8, gap: 6 },
+  steamGameRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: c.backgroundSecondary, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8 },
+  steamGameIcon: { width: 36, height: 36, borderRadius: 8 },
+  steamGameName: { color: c.text, fontSize: 13, fontWeight: '600' },
+  steamGameTime: { color: c.textSecondary, fontSize: 11, marginTop: 1 },
+  steamAddBtn: { width: 32, height: 32, borderRadius: 10, backgroundColor: c.primary, alignItems: 'center', justifyContent: 'center' },
 });

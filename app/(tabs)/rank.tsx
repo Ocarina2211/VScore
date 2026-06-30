@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
@@ -113,10 +114,7 @@ export default function RankScreen() {
       else if (name.includes(q)) scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + 200);
     });
     merged.sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
-    const filtered = merged.filter((g) =>
-      (g.added ?? 0) >= 1000 || g.name.toLowerCase() === q
-    );
-    setGames(filtered);
+    setGames(merged);
     setNextPage(null);
     setSearching(false);
   };
@@ -126,6 +124,23 @@ export default function RankScreen() {
       loadDefault(false);
     }
   };
+
+  const renderItem = useCallback(({ item }: { item: any }) => {
+    const meta = item.metacritic;
+    const src = getGameCover(item.id, item.background_image);
+    return (
+      <TouchableOpacity style={styles.card} onPress={() => router.push(`/rank/${item.id}` as any)} activeOpacity={0.82}>
+        {src ? <Image source={src} style={styles.cover} contentFit="cover" /> : null}
+        <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.cardGradient} />
+        {meta ? (
+          <View style={styles.metaBadge}>
+            <Text style={styles.metaText}>{meta}</Text>
+          </View>
+        ) : null}
+        <Text style={styles.name} numberOfLines={2}>{item.name}</Text>
+      </TouchableOpacity>
+    );
+  }, [styles, router]);
 
   return (
     <View style={styles.container}>
@@ -165,22 +180,11 @@ export default function RankScreen() {
           contentContainerStyle={styles.list}
           onEndReached={handleEndReached}
           onEndReachedThreshold={0.4}
+          removeClippedSubviews
+          maxToRenderPerBatch={10}
+          windowSize={5}
           ListFooterComponent={loadingMore ? <ActivityIndicator color={colors.primary} style={{ marginVertical: 16 }} /> : null}
-          renderItem={({ item }) => {
-            const meta = item.metacritic;
-            return (
-              <TouchableOpacity style={styles.card} onPress={() => router.push(`/rank/${item.id}` as any)} activeOpacity={0.82}>
-                {(() => { const src = getGameCover(item.id, item.background_image); return src ? <Image source={src} style={styles.cover} /> : null; })()}
-                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.cardGradient} />
-                {meta ? (
-                  <View style={styles.metaBadge}>
-                    <Text style={styles.metaText}>{meta}</Text>
-                  </View>
-                ) : null}
-                <Text style={styles.name} numberOfLines={2}>{item.name}</Text>
-              </TouchableOpacity>
-            );
-          }}
+          renderItem={renderItem}
         />
       )}
     </View>
@@ -189,7 +193,13 @@ export default function RankScreen() {
 
 const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background, paddingTop: 60 },
-  title: { fontSize: 44, fontWeight: '900', color: c.text, textAlign: 'center', fontFamily: 'Georgia', letterSpacing: 1 },
+  title: {
+    fontFamily: 'Nunito_700Bold',
+    fontSize: 44,
+    color: c.text,
+    textAlign: 'center',
+    letterSpacing: -0.5,
+  },
   subtitle: { color: c.textSecondary, fontSize: 13, fontWeight: '700', textAlign: 'center', marginTop: 4, marginBottom: 4 },
   divider: { height: 1, backgroundColor: c.primaryLight, marginHorizontal: 20, marginVertical: 14 },
   searchBar: {
@@ -216,7 +226,7 @@ const makeStyles = (c: any) => StyleSheet.create({
     borderColor: c.primaryLight,
   },
   metaText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
-  name: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10, fontFamily: 'Georgia' },
+  name: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 12, fontWeight: '700', padding: 10 },
   emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 80 },
   emptyText: { color: c.textSecondary, fontSize: 16, fontWeight: '600', textAlign: 'center' },
 });

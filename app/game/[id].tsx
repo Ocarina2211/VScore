@@ -1,15 +1,17 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useMemo, useState } from 'react';
-import { Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import SkeletonBox from '../../components/SkeletonBox';
 import { getGameCover } from '../../constants/CustomCovers';
 import { XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useResolvedLanguage, useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { fetchGameStats, GameStats, syncListsToFirestore, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
-import { fetchGameDetail, fetchGameScreenshots, fetchSimilarGames } from '../../services/rawg';
+import { fetchGameDetail, fetchGameScreenshots, fetchGameSteamUrl, fetchSimilarGames } from '../../services/rawg';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 // Synchronise la note, l'xp, le top3 et le profil (local + Firestore)
 async function handleRateAndTop3({
@@ -37,11 +39,11 @@ async function handleRateAndTop3({
   let xp = (await loadData(USER_KEYS.xp)) || 0;
   // Ajoute XP pour la note si c'est la première fois
   if (idx === -1) xp += XP_PER_RATING;
-  // Ajoute XP pour le top3 si le jeu vient d'y être ajouté
+  // Ajoute XP pour le top3 si le jeu vient d'y être ajouté (uniquement si le jeu n'était pas déjà noté auparavant)
   const oldTop3 = (await loadData(USER_KEYS.top3)) || [];
   const wasInTop3 = oldTop3.some((g: any) => g.id === ratingPayload.gameId);
   const nowInTop3 = newTop3.some((g: any) => g.id === ratingPayload.gameId);
-  if (!wasInTop3 && nowInTop3) xp += XP_PER_TOP3;
+  if (!wasInTop3 && nowInTop3 && idx === -1) xp += XP_PER_TOP3;
   await saveData(USER_KEYS.xp, xp);
   // 4. Met à jour le top3 local
   await saveData(USER_KEYS.top3, newTop3);
@@ -103,66 +105,76 @@ export default function GameDetailScreen() {
   const [communityStats, setCommunityStats] = useState<GameStats | null>(null);
   const [screenshots, setScreenshots] = useState<string[]>([]);
   const [similarGames, setSimilarGames] = useState<any[]>([]);
+  const [steamUrl, setSteamUrl] = useState<string | null>(null);
   const [translatedDesc, setTranslatedDesc] = useState<string | null>(null);
   const [listStatus, setListStatus] = useState<'wishlist' | 'backlog' | 'playing' | null>(null);
   const [listModalVisible, setListModalVisible] = useState(false);
+  const [updatingList, setUpdatingList] = useState(false);
   const router = useRouter();
 
   const handleSetList = async (status: 'wishlist' | 'backlog' | 'playing' | null) => {
-    const lists: any[] = (await loadData(USER_KEYS.lists)) ?? [];
-    let updatedLists;
-    if (status === null) {
-      updatedLists = lists.filter((l: any) => l.gameId !== Number(id));
-      await saveData(USER_KEYS.lists, updatedLists);
-      syncListsToFirestore(updatedLists).catch(() => {});
-      setListStatus(null);
-    } else {
-      const item = { gameId: Number(id), gameName: game?.name ?? '', gameImage: game?.background_image ?? '', metacritic: game?.metacritic, status, addedAt: Date.now() };
-      const idx = lists.findIndex((l: any) => l.gameId === Number(id));
-      if (idx >= 0) lists[idx] = item; else lists.push(item);
-      await saveData(USER_KEYS.lists, lists);
-      syncListsToFirestore(lists).catch(() => {});
-      setListStatus(status);
-      updatedLists = lists;
+    if (updatingList) return;
+    setUpdatingList(true);
+    try {
+      const lists: any[] = (await loadData(USER_KEYS.lists)) ?? [];
+      let updatedLists;
+      if (status === null) {
+        updatedLists = lists.filter((l: any) => l.gameId !== Number(id));
+        await saveData(USER_KEYS.lists, updatedLists);
+        syncListsToFirestore(updatedLists).catch(() => {});
+        setListStatus(null);
+      } else {
+        const item = { gameId: Number(id), gameName: game?.name ?? '', gameImage: game?.background_image ?? '', metacritic: game?.metacritic, status, addedAt: Date.now() };
+        const idx = lists.findIndex((l: any) => l.gameId === Number(id));
+        if (idx >= 0) lists[idx] = item; else lists.push(item);
+        await saveData(USER_KEYS.lists, lists);
+        syncListsToFirestore(lists).catch(() => {});
+        setListStatus(status);
+        updatedLists = lists;
+      }
+      // --- LOGIQUE TOP 3 & RATING PAR DÉFAUT ---
+      let ratings = (await loadData(USER_KEYS.ratings)) || [];
+      let rating = ratings.find((r: any) => r.id === Number(id));
+      if (!rating) {
+        // Crée un rating minimal si inexistant
+        rating = {
+          id: Number(id),
+          gameId: Number(id),
+          gameName: game?.name ?? '',
+          gameImage: game?.background_image ?? '',
+          general: 0,
+          graphics: 0,
+          gameplay: 0,
+          story: 0,
+          lifespan: 0,
+          avg: 0,
+          completed: false
+        };
+        ratings.push(rating);
+        await saveData(USER_KEYS.ratings, ratings);
+      }
+      const sorted = [...ratings].sort((a, b) => (b.general ?? 0) - (a.general ?? 0));
+      const newTop3 = sorted.slice(0, 3);
+      // Récupère pseudo/avatar
+      const profile = (await loadData(USER_KEYS.profile)) || {};
+      const pseudo = profile.pseudo || 'PSEUDO';
+      const avatarUri = profile.avatarUri || null;
+      const xp = (await loadData(USER_KEYS.xp)) || 0;
+      // Appelle la logique de synchro complète
+      const listsToSync = (await loadData(USER_KEYS.lists)) ?? [];
+      await handleRateAndTop3({
+        ratingPayload: rating,
+        newTop3,
+        pseudo,
+        avatarUri,
+        lists: listsToSync
+      });
+      setListModalVisible(false);
+    } catch (e) {
+      // ignore
+    } finally {
+      setUpdatingList(false);
     }
-    // --- LOGIQUE TOP 3 & RATING PAR DÉFAUT ---
-    let ratings = (await loadData(USER_KEYS.ratings)) || [];
-    let rating = ratings.find((r: any) => r.id === Number(id));
-    if (!rating) {
-      // Crée un rating minimal si inexistant
-      rating = {
-        id: Number(id),
-        gameId: Number(id),
-        gameName: game?.name ?? '',
-        gameImage: game?.background_image ?? '',
-        general: 0,
-        graphics: 0,
-        gameplay: 0,
-        story: 0,
-        lifespan: 0,
-        avg: 0,
-        completed: false
-      };
-      ratings.push(rating);
-      await saveData(USER_KEYS.ratings, ratings);
-    }
-    const sorted = [...ratings].sort((a, b) => (b.general ?? 0) - (a.general ?? 0));
-    const newTop3 = sorted.slice(0, 3);
-    // Récupère pseudo/avatar
-    const profile = (await loadData(USER_KEYS.profile)) || {};
-    const pseudo = profile.pseudo || 'PSEUDO';
-    const avatarUri = profile.avatarUri || null;
-    const xp = (await loadData(USER_KEYS.xp)) || 0;
-    // Appelle la logique de synchro complète
-    const listsToSync = (await loadData(USER_KEYS.lists)) ?? [];
-    await handleRateAndTop3({
-      ratingPayload: rating,
-      newTop3,
-      pseudo,
-      avatarUri,
-      lists: listsToSync
-    });
-    setListModalVisible(false);
   };
 
   const LIST_OPTIONS: { key: 'wishlist' | 'backlog' | 'playing'; label: string }[] = [
@@ -184,6 +196,7 @@ export default function GameDetailScreen() {
     });
     fetchGameStats(Number(id)).then(setCommunityStats);
     fetchGameScreenshots(Number(id)).then(setScreenshots);
+    fetchGameSteamUrl(Number(id)).then(setSteamUrl);
     fetchSimilarGames(Number(id)).then(setSimilarGames);
     loadData(USER_KEYS.lists).then((lists: any[]) => {
       if (!lists) return;
@@ -247,7 +260,7 @@ export default function GameDetailScreen() {
 
         {/* Hero */}
         <View style={styles.heroWrapper}>
-          {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.hero} /> : null; })()}
+          {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.hero} contentFit="cover" /> : null; })()}
           <LinearGradient
             colors={['transparent', colors.background]}
             style={styles.heroGradient}
@@ -311,6 +324,20 @@ export default function GameDetailScreen() {
           </View>
         )}
 
+        {steamUrl ? (
+          <TouchableOpacity
+            style={styles.steamBtn}
+            onPress={() => WebBrowser.openBrowserAsync(steamUrl)}
+            activeOpacity={0.8}
+            accessibilityRole="link"
+            accessibilityLabel={t.gameViewOnSteam}
+          >
+            <Ionicons name="logo-steam" size={21} color="#FFFFFF" />
+            <Text style={styles.steamBtnText}>{t.gameViewOnSteam}</Text>
+            <Ionicons name="open-outline" size={18} color="rgba(255,255,255,0.75)" />
+          </TouchableOpacity>
+        ) : null}
+
         {/* Community stats */}
         {communityStats && communityStats.count > 0 && (
           <View style={styles.section}>
@@ -369,7 +396,7 @@ export default function GameDetailScreen() {
             <Text style={[styles.sectionTitle, { paddingHorizontal: 16 }]}>{t.gameScreenshots}</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.screenshotsRow}>
               {screenshots.map((uri, i) => (
-                <Image key={i} source={{ uri }} style={styles.screenshotImg} />
+                <Image key={i} source={{ uri }} style={styles.screenshotImg} contentFit="cover" />
               ))}
             </ScrollView>
           </View>
@@ -383,7 +410,7 @@ export default function GameDetailScreen() {
               {similarGames.map((g) => (
                 <TouchableOpacity key={g.id} style={styles.similarCard} onPress={() => router.push(`/game/${g.id}` as any)} activeOpacity={0.8}>
                   {g.background_image ? (
-                    <Image source={{ uri: g.background_image }} style={styles.similarCover} />
+                    <Image source={{ uri: g.background_image }} style={styles.similarCover} contentFit="cover" />
                   ) : (
                     <View style={[styles.similarCover, { backgroundColor: colors.backgroundSecondary }]} />
                   )}
@@ -397,21 +424,26 @@ export default function GameDetailScreen() {
 
       {/* List management modal */}
       <Modal visible={listModalVisible} transparent animationType="fade" onRequestClose={() => setListModalVisible(false)}>
-        <TouchableOpacity style={styles.listModalOverlay} onPress={() => setListModalVisible(false)} activeOpacity={1}>
+        <TouchableOpacity style={styles.listModalOverlay} onPress={() => !updatingList && setListModalVisible(false)} activeOpacity={1}>
           <View style={styles.listModalBox}>
             <Text style={styles.listModalTitle}>{t.listManageTitle}</Text>
             {LIST_OPTIONS.map(({ key, label }) => (
               <TouchableOpacity
                 key={key}
-                style={[styles.listOption, listStatus === key && styles.listOptionActive]}
+                style={[styles.listOption, listStatus === key && styles.listOptionActive, updatingList && { opacity: 0.6 }]}
                 onPress={() => handleSetList(key)}
+                disabled={updatingList}
               >
                 <Text style={[styles.listOptionText, listStatus === key && styles.listOptionTextActive]}>{label}</Text>
                 {listStatus === key && <Ionicons name="checkmark-circle" size={18} color="#2ECC71" />}
               </TouchableOpacity>
             ))}
             {listStatus && (
-              <TouchableOpacity style={styles.listRemoveBtn} onPress={() => handleSetList(null)}>
+              <TouchableOpacity
+                style={[styles.listRemoveBtn, updatingList && { opacity: 0.6 }]}
+                onPress={() => handleSetList(null)}
+                disabled={updatingList}
+              >
                 <Text style={styles.listRemoveText}>{t.listRemove}</Text>
               </TouchableOpacity>
             )}
@@ -451,7 +483,7 @@ const makeStyles = (c: any) => StyleSheet.create({
     position: 'absolute', bottom: 16, left: 16, right: 16,
     flexDirection: 'row', alignItems: 'flex-end', gap: 12,
   },
-  heroTitle: { flex: 1, fontSize: 24, fontWeight: '900', color: '#FFFFFF', fontFamily: 'Georgia', lineHeight: 30 },
+  heroTitle: { flex: 1, fontSize: 24, fontWeight: '900', color: '#FFFFFF', lineHeight: 30, letterSpacing: -0.5 },
   metaBadge: { width: 52, height: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   metaScore: { color: '#fff', fontSize: 22, fontWeight: '900' },
 
@@ -461,6 +493,19 @@ const makeStyles = (c: any) => StyleSheet.create({
   tagText: { color: c.textSecondary, fontSize: 12, fontWeight: '600' },
   platformTag: { backgroundColor: c.backgroundSecondary, borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5, borderWidth: 1, borderColor: c.primary + '44' },
   platformTagText: { color: c.primary, fontSize: 11, fontWeight: '700' },
+  steamBtn: {
+    marginHorizontal: 16,
+    marginTop: 14,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+    backgroundColor: '#171D25',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+  },
+  steamBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800', flex: 1, textAlign: 'center' },
 
   // Info grid
   infoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16, marginTop: 14 },
