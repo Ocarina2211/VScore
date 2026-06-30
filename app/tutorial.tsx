@@ -5,18 +5,14 @@
  *   2. App concept
  *   3. Game card anatomy
  *   4. Honesty pledge
- *   5. Account creation (login) + pseudo + avatar → launch app
+ *   5. Pseudo + avatar creation → launch app (user is signed in anonymously)
  */
 
-import { FontAwesome } from '@expo/vector-icons';
-import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
-    Alert,
     Animated,
     Dimensions,
     FlatList,
@@ -35,14 +31,11 @@ import {
 } from 'react-native';
 import { useLanguage, useTranslation } from '../contexts/I18nContext';
 import { useColors } from '../contexts/ThemeContext';
-import { resetPassword, signInWithEmail, signInWithGoogleIdToken, signInWithGoogleToken, signUpWithEmail } from '../services/auth';
+import { signInAsGuest } from '../services/auth';
 import { auth } from '../services/firebase';
-import { loadData, saveData, USER_KEYS } from '../services/storage';
+import { saveData, USER_KEYS } from '../services/storage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-const GOOGLE_WEB_CLIENT_ID = '68957425502-9ubskvp3logqjm745pqn7goko62hsrvk.apps.googleusercontent.com';
-const GOOGLE_IOS_CLIENT_ID = '68957425502-q3csqeuus9d8qnrpicdd7c8knqno95a3.apps.googleusercontent.com';
 
 const TOTAL_SLIDES = 5;
 
@@ -223,119 +216,12 @@ function SlideAccount({ colors, onDone }: { colors: any; onDone: () => void }) {
   const t = useTranslation();
   const router = useRouter();
 
-  const [step, setStep] = useState<'auth' | 'profile'>('auth');
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signup');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
+  const [step, setStep] = useState<'profile' | 'promo'>('profile');
   const [pseudo, setPseudo] = useState('');
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
-  const [loading, setLoading] = useState<'email' | 'google' | null>(null);
-  const [error, setError] = useState('');
-  const passwordRef = useRef<TextInput>(null);
+  const [loading, setLoading] = useState(false);
   const shakeAnim = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    GoogleSignin.configure({
-      iosClientId: GOOGLE_IOS_CLIENT_ID,
-      webClientId: GOOGLE_WEB_CLIENT_ID,
-    });
-  }, []);
-
-  const proceedAfterAuth = async () => {
-    let profile = await loadData(USER_KEYS.profile);
-    if (!profile?.pseudo) {
-      const uid = auth.currentUser?.uid;
-      if (uid) {
-        try {
-          const { doc, getDoc } = await import('firebase/firestore');
-          const { db } = await import('../services/firebase');
-          const snap = await getDoc(doc(db, 'users', uid));
-          if (snap.exists() && snap.data()?.pseudo) {
-            profile = snap.data();
-            await saveData(USER_KEYS.profile, profile);
-          }
-        } catch (_) {}
-      }
-    }
-    if (profile?.pseudo) {
-      await saveData(USER_KEYS.tutorialSeen, true);
-      onDone();
-    } else {
-      setStep('profile');
-    }
-  };
-
-  const onGooglePress = async () => {
-    setError('');
-    setLoading('google');
-    if (Platform.OS === 'web') {
-      try {
-        const result = await signInWithPopup(auth, new GoogleAuthProvider());
-        const token = GoogleAuthProvider.credentialFromResult(result)?.accessToken;
-        if (token) await signInWithGoogleToken(token);
-        await proceedAfterAuth();
-        setLoading(null);
-      } catch {
-        setLoading(null);
-        setError(t.loginErrorGeneric);
-      }
-    } else {
-      try {
-        await GoogleSignin.hasPlayServices();
-        const userInfo = await GoogleSignin.signIn();
-        const idToken = userInfo.data?.idToken;
-        if (!idToken) throw new Error('no_id_token');
-        await signInWithGoogleIdToken(idToken);
-        await proceedAfterAuth();
-        setLoading(null);
-      } catch (e: any) {
-        setLoading(null);
-        if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
-          setError(t.loginErrorGeneric);
-        }
-      }
-    }
-  };
-
-  const onEmailSubmit = async () => {
-    const trimEmail = email.trim().toLowerCase();
-    if (!trimEmail || !password) return;
-    setError('');
-    setLoading('email');
-    try {
-      if (authMode === 'signup') {
-        await signUpWithEmail(trimEmail, password);
-      } else {
-        await signInWithEmail(trimEmail, password);
-      }
-      await proceedAfterAuth();
-      setLoading(null);
-    } catch (e: any) {
-      setLoading(null);
-      const code = e?.code ?? '';
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
-        setError(t.loginErrorInvalidCredentials);
-      } else if (code === 'auth/email-already-in-use') {
-        setError(t.loginErrorEmailInUse);
-      } else if (code === 'auth/weak-password') {
-        setError(t.loginErrorWeakPassword);
-      } else {
-        setError(t.loginErrorGeneric);
-      }
-    }
-  };
-
-  const onForgotPassword = async () => {
-    const trimEmail = email.trim().toLowerCase();
-    if (!trimEmail) { Alert.alert('', t.loginFillEmailFirst); return; }
-    try {
-      await resetPassword(trimEmail);
-      Alert.alert(t.loginResetEmailSent, t.loginResetEmailSentMessage);
-    } catch {
-      Alert.alert('', t.loginErrorGeneric);
-    }
-  };
+  const promoAnim = useRef(new Animated.Value(0)).current;
 
   const shake = () => {
     Animated.sequence([
@@ -362,165 +248,109 @@ function SlideAccount({ colors, onDone }: { colors: any; onDone: () => void }) {
     const trimmed = pseudo.trim();
     if (trimmed.length < 2) { shake(); return; }
     Keyboard.dismiss();
-    await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri });
-    await saveData(USER_KEYS.tutorialSeen, true);
-    onDone();
+    setLoading(true);
+    try {
+      if (!auth.currentUser) {
+        await signInAsGuest();
+      }
+      await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri });
+      await saveData(USER_KEYS.tutorialSeen, true);
+      setLoading(false);
+      // Animate in the promo splash
+      promoAnim.setValue(0);
+      setStep('promo');
+      Animated.timing(promoAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    } catch {
+      setLoading(false);
+    }
   };
 
   const s = useMemo(() => makeAccountStyles(colors), [colors]);
 
-  if (step === 'profile') {
+  if (step === 'promo') {
     return (
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: colors.background }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      <Animated.View
+        style={{
+          flex: 1,
+          backgroundColor: colors.background,
+          opacity: promoAnim,
+          transform: [{ translateY: promoAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+        }}
       >
-        <ScrollView contentContainerStyle={s.root} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-          <Text style={[slideStyles.bigTitle, { color: colors.text, textAlign: 'center' }]}>{t.onboardingWelcome}</Text>
-          <Text style={[slideStyles.body, { color: colors.textSecondary, textAlign: 'center', marginBottom: 24 }]}>{t.onboardingSubtitle}</Text>
+        <ScrollView contentContainerStyle={[s.root, { justifyContent: 'center', paddingTop: 60 }]} showsVerticalScrollIndicator={false}>
+          <Text style={[slideStyles.bigTitle, { color: colors.text, textAlign: 'center', marginBottom: 8 }]}>
+            {t.tutorialPromoTitle}
+          </Text>
+          <Text style={[slideStyles.body, { color: colors.textSecondary, textAlign: 'center', marginBottom: 36 }]}>
+            {t.tutorialPromoSubtitle}
+          </Text>
 
-          <TouchableOpacity style={s.avatarPicker} onPress={pickAvatar} activeOpacity={0.8}>
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={s.avatarImage} />
-            ) : (
-              <View style={s.avatarPlaceholder}>
-                <Text style={{ fontSize: 36 }}>🎮</Text>
-                <Text style={[s.avatarHint, { color: colors.textSecondary }]}>{t.onboardingChoosePhoto}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-
-          <Animated.View style={{ width: '100%', transform: [{ translateX: shakeAnim }] }}>
-            <TextInput
-              style={[s.input, { color: colors.text, backgroundColor: colors.backgroundSecondary }]}
-              placeholder={t.onboardingPlaceholder}
-              placeholderTextColor={colors.textSecondary}
-              value={pseudo}
-              onChangeText={setPseudo}
-              autoCapitalize="none"
-              returnKeyType="done"
-              onSubmitEditing={onFinish}
-            />
-          </Animated.View>
+          {[t.tutorialPromoBenefit1, t.tutorialPromoBenefit2, t.tutorialPromoBenefit3].map((benefit, i) => (
+            <View key={i} style={[s.benefitRow, { backgroundColor: colors.backgroundSecondary }]}>
+              <Text style={[s.benefitText, { color: colors.text }]}>{benefit}</Text>
+            </View>
+          ))}
 
           <TouchableOpacity
-            style={[s.submitBtn, { backgroundColor: colors.primary, opacity: pseudo.trim().length < 2 ? 0.5 : 1 }]}
-            onPress={onFinish}
-            disabled={pseudo.trim().length < 2}
+            style={[s.submitBtn, { backgroundColor: colors.primary, marginTop: 32 }]}
+            onPress={() => router.replace('/login' as any)}
             activeOpacity={0.85}
           >
-            <Text style={s.submitBtnText}>{t.tutorialStart}</Text>
+            <Text style={s.submitBtnText}>{t.tutorialPromoCreateAccount}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={s.guestBtn} onPress={onDone} activeOpacity={0.7}>
+            <Text style={s.guestText}>{t.tutorialPromoLater}</Text>
           </TouchableOpacity>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </Animated.View>
     );
   }
 
-  // step === 'auth'
+  // step === 'profile'
   return (
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: colors.background }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView contentContainerStyle={s.root} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <Text style={[slideStyles.bigTitle, { color: colors.text, textAlign: 'center' }]}>{t.tutorialAccountTitle}</Text>
-        <Text style={[slideStyles.body, { color: colors.textSecondary, textAlign: 'center', marginBottom: 20 }]}>{t.tutorialAccountSubtitle}</Text>
+        <Text style={[slideStyles.bigTitle, { color: colors.text, textAlign: 'center' }]}>{t.onboardingWelcome}</Text>
+        <Text style={[slideStyles.body, { color: colors.textSecondary, textAlign: 'center', marginBottom: 24 }]}>{t.onboardingSubtitle}</Text>
 
-        {/* Mode toggle */}
-        <View style={s.modeToggle}>
-          {(['signup', 'signin'] as const).map((m) => (
-            <TouchableOpacity
-              key={m}
-              style={[s.modeBtn, authMode === m && { backgroundColor: colors.primary }]}
-              onPress={() => { setAuthMode(m); setError(''); }}
-            >
-              <Text style={[s.modeBtnText, { color: authMode === m ? '#FFF' : colors.textSecondary }]}>
-                {m === 'signup' ? t.loginSignUp : t.loginSignIn}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Email */}
-        <View style={[s.inputWrapper, { backgroundColor: colors.backgroundSecondary }]}>
-          <TextInput
-            style={[s.inputInner, { color: colors.text }]}
-            placeholder={t.loginEmail}
-            placeholderTextColor={colors.textSecondary}
-            value={email}
-            onChangeText={(v) => { setEmail(v); setError(''); }}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="email"
-            textContentType="emailAddress"
-            returnKeyType="next"
-            onSubmitEditing={() => passwordRef.current?.focus()}
-            editable={loading === null}
-          />
-        </View>
-
-        {/* Password */}
-        <View style={[s.inputWrapper, { backgroundColor: colors.backgroundSecondary }]}>
-          <TextInput
-            ref={passwordRef}
-            style={[s.inputInner, { color: colors.text, flex: 1 }]}
-            placeholder={t.loginPassword}
-            placeholderTextColor={colors.textSecondary}
-            value={password}
-            onChangeText={(v) => { setPassword(v); setError(''); }}
-            secureTextEntry={!showPassword}
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
-            textContentType={authMode === 'signup' ? 'newPassword' : 'password'}
-            passwordRules="minlength: 6;"
-            returnKeyType="go"
-            onSubmitEditing={onEmailSubmit}
-            editable={loading === null}
-          />
-          <TouchableOpacity onPress={() => setShowPassword((v) => !v)} style={s.eyeBtn}>
-            <Text style={{ fontSize: 18 }}>{showPassword ? '🙈' : '👁️'}</Text>
-          </TouchableOpacity>
-        </View>
-
-        {authMode === 'signin' && (
-          <TouchableOpacity onPress={onForgotPassword} style={s.forgotBtn}>
-            <Text style={[s.forgotText, { color: colors.primary }]}>{t.loginForgotPassword}</Text>
-          </TouchableOpacity>
-        )}
-
-        {error ? <Text style={s.errorText}>{error}</Text> : null}
-
-        <TouchableOpacity
-          style={[s.submitBtn, { backgroundColor: colors.primary, opacity: (!email || !password || loading !== null) ? 0.5 : 1 }]}
-          onPress={onEmailSubmit}
-          disabled={!email || !password || loading !== null}
-          activeOpacity={0.85}
-        >
-          {loading === 'email' ? (
-            <ActivityIndicator size="small" color="#FFF" />
+        <TouchableOpacity style={s.avatarPicker} onPress={pickAvatar} activeOpacity={0.8}>
+          {avatarUri ? (
+            <Image source={{ uri: avatarUri }} style={s.avatarImage} />
           ) : (
-            <Text style={s.submitBtnText}>{authMode === 'signin' ? t.loginSubmitSignIn : t.loginSubmitSignUp}</Text>
+            <View style={s.avatarPlaceholder}>
+              <Text style={{ fontSize: 36 }}>🎮</Text>
+              <Text style={[s.avatarHint, { color: colors.textSecondary }]}>{t.onboardingChoosePhoto}</Text>
+            </View>
           )}
         </TouchableOpacity>
 
-        {/* Divider */}
-        <View style={s.dividerRow}>
-          <View style={[s.dividerLine, { backgroundColor: colors.backgroundSecondary }]} />
-          <Text style={[s.dividerText, { color: colors.textSecondary }]}>{t.loginOr}</Text>
-          <View style={[s.dividerLine, { backgroundColor: colors.backgroundSecondary }]} />
-        </View>
+        <Animated.View style={{ width: '100%', transform: [{ translateX: shakeAnim }] }}>
+          <TextInput
+            style={[s.input, { color: colors.text, backgroundColor: colors.backgroundSecondary }]}
+            placeholder={t.onboardingPlaceholder}
+            placeholderTextColor={colors.textSecondary}
+            value={pseudo}
+            onChangeText={setPseudo}
+            autoCapitalize="none"
+            returnKeyType="done"
+            onSubmitEditing={onFinish}
+          />
+        </Animated.View>
 
-        {/* Google */}
-        <TouchableOpacity style={s.googleBtn} onPress={onGooglePress} disabled={loading !== null} activeOpacity={0.85}>
-          {loading === 'google' ? (
-            <ActivityIndicator size="small" color="#1A1A2E" />
+        <TouchableOpacity
+          style={[s.submitBtn, { backgroundColor: colors.primary, opacity: (pseudo.trim().length < 2 || loading) ? 0.5 : 1 }]}
+          onPress={onFinish}
+          disabled={pseudo.trim().length < 2 || loading}
+          activeOpacity={0.85}
+        >
+          {loading ? (
+            <ActivityIndicator size="small" color="#FFF" />
           ) : (
-            <>
-              <FontAwesome name="google" size={18} color="#4285F4" />
-              <Text style={s.googleText}>{t.loginGoogle}</Text>
-            </>
+            <Text style={s.submitBtnText}>{t.tutorialStart}</Text>
           )}
         </TouchableOpacity>
       </ScrollView>
@@ -581,7 +411,12 @@ export default function TutorialScreen() {
           style={[navStyles.skip, { top: Platform.OS === 'ios' ? 56 : 20 }]}
           onPress={async () => {
             await saveData(USER_KEYS.tutorialSeen, true);
-            router.replace('/login');
+            try {
+              if (!auth.currentUser) {
+                await signInAsGuest();
+              }
+            } catch (_) {}
+            router.replace('/(tabs)');
           }}
         >
           <Text style={[navStyles.skipText, { color: colors.textSecondary }]}>{t.tutorialSkip}</Text>
@@ -650,7 +485,7 @@ const slideStyles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     marginBottom: 8,
   },
-  crystalV: { fontSize: 40, fontWeight: '900', fontFamily: 'Georgia' },
+  crystalV: { fontSize: 40, fontWeight: '900' },
   bigTitle: { fontSize: 26, fontWeight: '900', textAlign: 'center', lineHeight: 34 },
   body: { fontSize: 15, textAlign: 'center', lineHeight: 22 },
   langRow: { flexDirection: 'row', gap: 16, marginTop: 8 },
@@ -705,7 +540,7 @@ const realCardStyles = StyleSheet.create({
     borderWidth: 1,
   },
   ratedText: { fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
-  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8, fontFamily: 'Georgia' },
+  cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8 },
 });
 
 const calloutStyles = StyleSheet.create({
@@ -775,8 +610,13 @@ const makeAccountStyles = (c: any) => StyleSheet.create({
     backgroundColor: '#FFFFFF', borderRadius: 14, paddingVertical: 15,
     shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3,
   },
-  googleIcon: { fontSize: 17, fontWeight: '900', color: '#4285F4', fontFamily: 'Georgia' },
+  googleIcon: { fontSize: 17, fontWeight: '900', color: '#4285F4' },
   googleText: { fontSize: 15, fontWeight: '700', color: '#1A1A2E' },
+  appleBtn: { height: 50, width: '100%', marginTop: 4 },
+  guestBtn: { alignItems: 'center', paddingVertical: 8, marginTop: 4 },
+  guestText: { color: c.textSecondary, fontSize: 14, fontWeight: '600', textDecorationLine: 'underline' },
+  benefitRow: { borderRadius: 12, padding: 14, marginBottom: 10, width: '100%' },
+  benefitText: { fontSize: 15, lineHeight: 22 },
   avatarPicker: {
     alignSelf: 'center', width: 100, height: 100, borderRadius: 50, overflow: 'hidden',
     backgroundColor: c.backgroundSecondary,

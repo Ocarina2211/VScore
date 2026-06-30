@@ -8,6 +8,7 @@ import {
     Modal,
     PanResponder,
     Platform,
+    Share,
     StyleSheet,
     Text,
     TextInput,
@@ -224,7 +225,22 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
           {loading ? (
             <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} />
           ) : search.trim().length < 2 ? (
-            <Text style={styles.hint}>{t.friendsSearchHint}</Text>
+            <>
+              <TouchableOpacity
+                style={styles.inviteBtn}
+                onPress={() => {
+                  if (!myUid) return;
+                  Share.share({
+                    message: `Rejoins-moi sur VScore 🎮\nAjoute-moi en ami directement : vscore://invite/${myUid}\n\nTu n'as pas encore VScore ? Télécharge l'app sur l'App Store !`,
+                    title: 'Invitation VScore',
+                  });
+                }}
+              >
+                <Ionicons name="share-social-outline" size={18} color={colors.primary} style={{ marginRight: 8 }} />
+                <Text style={styles.inviteBtnText}>Inviter un contact</Text>
+              </TouchableOpacity>
+              <Text style={styles.hint}>{t.friendsSearchHint}</Text>
+            </>
           ) : results.length === 0 ? (
             <Text style={styles.hint}>{t.friendsNoResults}</Text>
           ) : (
@@ -296,7 +312,19 @@ const makeStyles = (c: any, screenHeight: number) =>
       marginBottom: 12,
     },
     searchInput: { flex: 1, color: c.text, fontSize: 15 },
-    hint: { color: c.textSecondary, textAlign: 'center', marginVertical: 24, fontSize: 14 },
+    hint: { color: c.textSecondary, textAlign: 'center', marginVertical: 16, fontSize: 14 },
+    inviteBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1.5,
+      borderColor: c.primary,
+      borderRadius: 14,
+      paddingVertical: 12,
+      marginTop: 16,
+      marginBottom: 4,
+    },
+    inviteBtnText: { color: c.primary, fontWeight: '700', fontSize: 15 },
     list: { flex: 1 },
     userRow: {
       flexDirection: 'row',

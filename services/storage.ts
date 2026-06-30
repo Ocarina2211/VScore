@@ -24,4 +24,11 @@ export const USER_KEYS = {
   lists: 'user_lists',
   lastSeenRequestCount: 'last_seen_request_count',
   lastSeenFriendCount: 'last_seen_friend_count',
+  lastSeenRequestIds: 'last_seen_request_ids',
+  lastSeenFriendUids: 'last_seen_friend_uids',
+  lastSeenSentUids: 'last_seen_sent_uids',
+  lastSeenFriendActivityAt: 'last_seen_friend_activity_at',
+  lastAppOpenAt: 'last_app_open_at',
+  notificationsEnabled: 'notifications_enabled',
+  steamId: 'user_steam_id',
 };

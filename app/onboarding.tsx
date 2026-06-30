@@ -6,6 +6,7 @@ import { Animated, Image, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, 
 import { useTranslation } from '../contexts/I18nContext';
 import { useColors } from '../contexts/ThemeContext';
 import { uploadAvatarAsync } from '../services/avatar';
+import { isPseudoTaken } from '../services/community';
 import { auth, db } from '../services/firebase';
 import { saveData, USER_KEYS } from '../services/storage';
 
@@ -42,6 +43,8 @@ export default function OnboardingScreen() {
     ]).start();
   };
 
+  const [loading, setLoading] = useState(false);
+
   const handleStart = async () => {
     const trimmed = pseudo.trim();
     if (trimmed.length < 2) {
@@ -49,9 +52,17 @@ export default function OnboardingScreen() {
       shake();
       return;
     }
+    const uid = auth.currentUser?.uid ?? '';
+    setLoading(true);
+    const taken = await isPseudoTaken(trimmed, uid);
+    setLoading(false);
+    if (taken) {
+      setError('Ce pseudo est déjà pris, choisis-en un autre.');
+      shake();
+      return;
+    }
     Keyboard.dismiss();
     let finalAvatarUri = avatarUri;
-    const uid = auth.currentUser?.uid;
     if (uid && avatarUri && avatarUri.startsWith('file')) {
       try {
         finalAvatarUri = await uploadAvatarAsync(avatarUri, uid);
@@ -105,8 +116,8 @@ export default function OnboardingScreen() {
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
         {/* CTA */}
-        <TouchableOpacity style={[styles.btn, pseudo.trim().length >= 2 && styles.btnActive]} onPress={handleStart} activeOpacity={0.85}>
-          <Text style={styles.btnText}>{t.onboardingCTA}</Text>
+        <TouchableOpacity style={[styles.btn, pseudo.trim().length >= 2 && styles.btnActive]} onPress={handleStart} disabled={loading} activeOpacity={0.85}>
+          <Text style={styles.btnText}>{loading ? '...' : t.onboardingCTA}</Text>
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
@@ -116,7 +127,7 @@ export default function OnboardingScreen() {
 const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background },
   inner: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 16 },
-  logo: { fontSize: 36, fontWeight: '900', color: c.text, fontFamily: 'Georgia', letterSpacing: 2 },
+  logo: { fontSize: 36, fontWeight: '900', color: c.text, letterSpacing: -1 },
   logoAccent: { color: c.primary },
   headline: { fontSize: 26, fontWeight: '900', color: c.text, textAlign: 'center' },
   subtitle: { fontSize: 15, color: c.textSecondary, textAlign: 'center', lineHeight: 22 },

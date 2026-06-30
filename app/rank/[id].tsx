@@ -1,15 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import SkeletonBox from '../../components/SkeletonBox';
 import { getGameCover } from '../../constants/CustomCovers';
 import { getRank, XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { fetchGameStats, GameStats, syncRatingToFirestore } from '../../services/community';
+import { deleteRatingFromFirestore, fetchGameStats, GameStats, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
 import { fetchGameDetail } from '../../services/rawg';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 
@@ -101,7 +102,24 @@ export default function RankGameScreen() {
   const xpAnimValue = useRef(new Animated.Value(0)).current;
   const [xpGainLabel, setXpGainLabel] = useState<string | null>(null);
   const [comment, setComment] = useState('');
+  const [hoursPlayed, setHoursPlayed] = useState<string | null>(null);
   const router = useRouter();
+
+  const syncProfileToCloud = async (newXP: number, newTop3: any[]) => {
+    try {
+      const [profile, lists] = await Promise.all([
+        loadData(USER_KEYS.profile),
+        loadData(USER_KEYS.lists),
+      ]);
+      syncPublicProfile(
+        (profile ?? {}).pseudo ?? 'PSEUDO',
+        (profile ?? {}).avatarUri ?? null,
+        newXP,
+        newTop3,
+        lists ?? []
+      ).catch(() => {});
+    } catch {}
+  };
 
   const showXpAndNavigate = (gain: number, route: string) => {
     setXpGainLabel(`+${gain} XP`);
@@ -130,6 +148,7 @@ export default function RankGameScreen() {
       setLifespan(existing.lifespan ?? 0);
       setCompleted(existing.completed ?? false);
       setComment(existing.comment ?? '');
+      setHoursPlayed(existing.hoursPlayed ?? null);
       savedRef.current = existing;
       setAlreadyRated(true);
     });
@@ -146,15 +165,40 @@ export default function RankGameScreen() {
       || st !== (s.story ?? s.soundtrack ?? 0) || ls !== (s.lifespan ?? 0) || c !== (s.completed ?? false);
   };
 
+  // Auto-saves a field patch instantly to local storage + Firestore (non-blocking).
+  // Optimistically updates savedRef so dirty checks are immediately correct.
+  const autoSave = (patch: Record<string, any>) => {
+    if (savedRef.current) savedRef.current = { ...savedRef.current, ...patch };
+    (async () => {
+      const ratings = (await loadData(USER_KEYS.ratings)) || [];
+      const i = ratings.findIndex((r: any) => r.id === game.id);
+      if (i < 0) return;
+      ratings[i] = { ...ratings[i], ...patch, synced: false };
+      await saveData(USER_KEYS.ratings, ratings);
+      savedRef.current = ratings[i];
+      syncRatingToFirestore({
+        gameId: game.id, gameName: game.name, gameImage: game.background_image,
+        general: ratings[i].general ?? 0, graphics: ratings[i].graphics ?? 0,
+        gameplay: ratings[i].gameplay ?? 0, story: ratings[i].story ?? 0,
+        lifespan: ratings[i].lifespan ?? 0, completed: ratings[i].completed ?? false,
+        comment: ratings[i].comment, hoursPlayed: ratings[i].hoursPlayed ?? undefined,
+      }).then(async (ok) => {
+        if (!ok) return;
+        const stored = (await loadData(USER_KEYS.ratings)) || [];
+        const si = stored.findIndex((r: any) => r.id === game.id);
+        if (si >= 0) { stored[si] = { ...stored[si], synced: true }; await saveData(USER_KEYS.ratings, stored); }
+      });
+    })();
+  };
+
   const onStarChange = (setter: (v: number) => void, field: string, v: number,
-    cur: { g: number; gr: number; gp: number; st: number; ls: number }) => {
+    _cur?: any) => {
     setter(v);
     setErrors((e) => e.filter((x) => x !== field));
     if (alreadyRated) {
-      const next = { ...cur, [field]: v };
-      const dirty = checkDirty(next.g, next.gr, next.gp, next.st, next.ls, completed);
-      setIsDirty(dirty);
-      Animated.spring(btnAnim, { toValue: dirty ? 1 : 0, useNativeDriver: true }).start();
+      autoSave({ [field]: v });
+      setIsDirty(false);
+      Animated.spring(btnAnim, { toValue: 0, useNativeDriver: true }).start();
     }
   };
 
@@ -171,12 +215,12 @@ export default function RankGameScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSaving(true);
     const existing = savedRef.current;
-    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, ratedAt: existing?.ratedAt ?? Date.now() };
+    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existing?.ratedAt ?? Date.now() };
     const ratings = await loadData(USER_KEYS.ratings) || [];
     const idx = ratings.findIndex((r: any) => r.id === game.id);
     if (idx >= 0) ratings[idx] = rating; else ratings.push(rating);
     await saveData(USER_KEYS.ratings, ratings);
-    const synced = await syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment });
+    const synced = await syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined });
     if (synced) {
       const updatedRatings = await loadData(USER_KEYS.ratings) || [];
       const si = updatedRatings.findIndex((r: any) => r.id === game.id);
@@ -189,6 +233,7 @@ export default function RankGameScreen() {
   };
 
   const handleValidate = async (addToTop3: boolean) => {
+    if (saving) return;
     const missing: string[] = [];
     if (!general) missing.push('general');
     if (!graphics) missing.push('graphics');
@@ -201,16 +246,17 @@ export default function RankGameScreen() {
       return;
     }
     setErrors([]);
+    setSaving(true);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const ratings = await loadData(USER_KEYS.ratings) || [];
     const xp = await loadData(USER_KEYS.xp) || 0;
     const top3 = await loadData(USER_KEYS.top3) || [];
 
     const existingRating = (await loadData(USER_KEYS.ratings) || []).find((r: any) => r.id === game.id);
-    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, ratedAt: existingRating?.ratedAt ?? Date.now() };
+    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existingRating?.ratedAt ?? Date.now() };
 
     // Sync to Firestore (non-blocking) and mark as synced on success
-    syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment })
+    syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined })
       .then(async (ok) => {
         if (ok) {
           const stored = await loadData(USER_KEYS.ratings) || [];
@@ -232,10 +278,12 @@ export default function RankGameScreen() {
         setPendingRating(rating);
         setCurrentTop3(top3);
         setTop3Modal(true);
+        setSaving(false); // Reset saving since we are opening the replacement modal
         // Still save base XP
         const oldRank = getRank(xp);
         const newXP = xp + XP_PER_RATING;
         await saveData(USER_KEYS.xp, newXP);
+        syncProfileToCloud(newXP, top3);
         const newRank = getRank(newXP);
         const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
         if (levelUp) router.setParams({ pendingLevelUp: levelUp });
@@ -246,6 +294,7 @@ export default function RankGameScreen() {
       const oldRank = getRank(xp);
       const newXP = xp + XP_PER_RATING + XP_PER_TOP3;
       await saveData(USER_KEYS.xp, newXP);
+      syncProfileToCloud(newXP, newTop3);
       const newRank = getRank(newXP);
       const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
       showXpAndNavigate(XP_PER_RATING + XP_PER_TOP3, `/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}`);
@@ -255,65 +304,138 @@ export default function RankGameScreen() {
     const oldRank = getRank(xp);
     const newXP = xp + XP_PER_RATING;
     await saveData(USER_KEYS.xp, newXP);
+    syncProfileToCloud(newXP, top3);
     const newRank = getRank(newXP);
     const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
     showXpAndNavigate(XP_PER_RATING, `/success?addedToTop3=${addToTop3}&levelUp=${encodeURIComponent(levelUp)}`);
   };
 
   const handleAddExistingToTop3 = async () => {
-    // Save any pending edits first
-    if (isDirty) await handleSaveEdit();
-    const rating = savedRef.current ?? { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment };
-    const top3 = await loadData(USER_KEYS.top3) || [];
-    const alreadyIn = top3.some((g: any) => g.id === game.id);
-    if (alreadyIn) {
-      // Update the entry in top 3 without extra XP
-      const newTop3 = top3.map((g: any) => g.id === game.id ? rating : g);
-      await saveData(USER_KEYS.top3, newTop3);
-      setIsInTop3(true);
-      router.push(`/success?addedToTop3=true&levelUp=` as any);
-      return;
+    if (saving) return;
+    setSaving(true);
+    try {
+      // Save any pending edits first
+      if (isDirty) await handleSaveEdit();
+      const rating = savedRef.current ?? { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment };
+      const top3 = await loadData(USER_KEYS.top3) || [];
+      const alreadyIn = top3.some((g: any) => g.id === game.id);
+      if (alreadyIn) {
+        // Update the entry in top 3 without extra XP
+        const newTop3 = top3.map((g: any) => g.id === game.id ? rating : g);
+        await saveData(USER_KEYS.top3, newTop3);
+        setIsInTop3(true);
+        const currentXp = await loadData(USER_KEYS.xp) || 0;
+        syncProfileToCloud(currentXp, newTop3);
+        router.push(`/success?addedToTop3=true&levelUp=` as any);
+        return;
+      }
+      if (top3.length < 3) {
+        // Space available — add directly
+        const newTop3 = [...top3, rating];
+        await saveData(USER_KEYS.top3, newTop3);
+        const xp = await loadData(USER_KEYS.xp) || 0;
+        const oldRank = getRank(xp);
+        // user decided to put a game in their top 3 which is already in their rated games -> 0 XP gained
+        const newXP = xp;
+        await saveData(USER_KEYS.xp, newXP);
+        syncProfileToCloud(newXP, newTop3);
+        const newRank = getRank(newXP);
+        const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
+        setIsInTop3(true);
+        router.push(`/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}` as any);
+        return;
+      }
+      // Top 3 full — show replacement modal
+      setPendingRating(rating);
+      setCurrentTop3(top3);
+      setTop3Modal(true);
+      setSaving(false); // Reset saving since we are opening the replacement modal
+    } catch (e) {
+      setSaving(false);
     }
-    if (top3.length < 3) {
-      // Space available — add directly
-      const newTop3 = [...top3, rating];
-      await saveData(USER_KEYS.top3, newTop3);
-      const xp = await loadData(USER_KEYS.xp) || 0;
-      const oldRank = getRank(xp);
-      const newXP = xp + XP_PER_TOP3;
-      await saveData(USER_KEYS.xp, newXP);
-      const newRank = getRank(newXP);
-      const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
-      setIsInTop3(true);
-      showXpAndNavigate(XP_PER_TOP3, `/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}`);
-      return;
-    }
-    // Top 3 full — show replacement modal
-    setPendingRating(rating);
-    setCurrentTop3(top3);
-    setTop3Modal(true);
   };
 
   const handleReplace = async (indexToReplace: number) => {
+    if (saving) return;
+    setSaving(true);
     setSwappingIndex(indexToReplace);
     swapAnim.setValue(0);
     Animated.sequence([
       Animated.timing(swapAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
       Animated.timing(swapAnim, { toValue: 2, duration: 300, useNativeDriver: true }),
     ]).start(async () => {
-      const newTop3 = [...currentTop3];
-      newTop3[indexToReplace] = pendingRating;
-      const xp = await loadData(USER_KEYS.xp) || 0;
-      await saveData(USER_KEYS.top3, newTop3);
-      const newXP = xp + XP_PER_TOP3;
-      await saveData(USER_KEYS.xp, newXP);
-      const newRank = getRank(newXP);
-      const oldRank = getRank(xp);
-      const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
-      setTop3Modal(false);
-      setSwappingIndex(null);
-      showXpAndNavigate(XP_PER_TOP3, `/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}`);
+      try {
+        const newTop3 = [...currentTop3];
+        newTop3[indexToReplace] = pendingRating;
+        const xp = await loadData(USER_KEYS.xp) || 0;
+        await saveData(USER_KEYS.top3, newTop3);
+        // user decided to put a game in their top 3 which is already in their rated games -> 0 XP gained
+        const xpAward = alreadyRated ? 0 : XP_PER_TOP3;
+        const newXP = xp + xpAward;
+        await saveData(USER_KEYS.xp, newXP);
+        syncProfileToCloud(newXP, newTop3);
+        const newRank = getRank(newXP);
+        const oldRank = getRank(xp);
+        const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
+        setTop3Modal(false);
+        setSwappingIndex(null);
+        if (xpAward > 0) {
+          showXpAndNavigate(xpAward, `/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}`);
+        } else {
+          router.push(`/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}` as any);
+        }
+      } catch (err) {
+        setSaving(false);
+      }
     });
+  };
+
+  const handleRemoveRating = () => {
+    if (saving) return;
+    Alert.alert(
+      'Retirer cette note',
+      `Supprimer ta note pour "${game?.name}" ? Tu perdras ${XP_PER_RATING} XP${isInTop3 ? ` + ${XP_PER_TOP3} XP (Top 3)` : ''}.`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Retirer',
+          style: 'destructive',
+          onPress: async () => {
+            setSaving(true);
+            try {
+              const ratings: any[] = (await loadData(USER_KEYS.ratings)) ?? [];
+              const newRatings = ratings.filter((r: any) => r.id !== Number(id));
+              await saveData(USER_KEYS.ratings, newRatings);
+
+              let xpLost = XP_PER_RATING;
+              const top3: any[] = (await loadData(USER_KEYS.top3)) ?? [];
+              let newTop3 = top3;
+              if (isInTop3) {
+                xpLost += XP_PER_TOP3;
+                newTop3 = top3.filter((g: any) => g.id !== Number(id));
+                await saveData(USER_KEYS.top3, newTop3);
+              }
+
+              const currentXp: number = (await loadData(USER_KEYS.xp)) ?? 0;
+              const newXP = Math.max(0, currentXp - xpLost);
+              await saveData(USER_KEYS.xp, newXP);
+
+              // Stamp local profile as just-modified so loadProfileData won't
+              // overwrite top3 with stale Firestore data before the async sync completes
+              const profile = (await loadData(USER_KEYS.profile)) ?? {};
+              await saveData(USER_KEYS.profile, { ...profile, _updatedAt: Date.now() });
+
+              deleteRatingFromFirestore(Number(id));
+              syncProfileToCloud(newXP, newTop3);
+
+              router.back();
+            } catch (err) {
+              setSaving(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   if (loading) return (
@@ -342,7 +464,7 @@ export default function RankGameScreen() {
 
       {/* Hero */}
       <View style={styles.heroWrapper}>
-        {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.heroImage} /> : null; })()}
+        {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.heroImage} contentFit="cover" /> : null; })()}
         <LinearGradient colors={['transparent', colors.background]} style={styles.heroGradient} />
         <TouchableOpacity style={styles.back} onPress={() => router.back()}>
           <Ionicons name="chevron-back" size={22} color="#FFFFFF" />
@@ -375,9 +497,9 @@ export default function RankGameScreen() {
           const next = !completed;
           setCompleted(next);
           if (alreadyRated) {
-            const dirty = checkDirty(general, graphics, gameplay, story, lifespan, next);
-            setIsDirty(dirty);
-            Animated.spring(btnAnim, { toValue: dirty ? 1 : 0, useNativeDriver: true }).start();
+            autoSave({ completed: next });
+            setIsDirty(false);
+            Animated.spring(btnAnim, { toValue: 0, useNativeDriver: true }).start();
           }
         }}
         activeOpacity={0.8}
@@ -387,6 +509,30 @@ export default function RankGameScreen() {
         </View>
         <Text style={styles.checkboxLabel}>{t.rankCompletedLabel}</Text>
       </TouchableOpacity>
+
+      {/* Hours played selector */}
+      <View style={styles.hoursSection}>
+        <Text style={styles.hoursLabel}>{t.rankHoursLabel}</Text>
+        <View style={styles.hoursRow}>
+          {(['0-5h', '5-20h', '20-50h', '50h+'] as const).map((range) => {
+            const selected = hoursPlayed === range;
+            return (
+              <TouchableOpacity
+                key={range}
+                style={[styles.hoursBtn, selected && styles.hoursBtnSelected]}
+                activeOpacity={0.75}
+                onPress={() => {
+                  const next = selected ? null : range;
+                  setHoursPlayed(next);
+                  if (alreadyRated) autoSave({ hoursPlayed: next });
+                }}
+              >
+                <Text style={[styles.hoursBtnText, selected && styles.hoursBtnTextSelected]}>{range}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
 
       {/* Star ratings */}
       <View style={styles.ratingsSection}>
@@ -460,11 +606,19 @@ export default function RankGameScreen() {
 
       {!alreadyRated && (
         <View style={styles.actionButtons}>
-          <TouchableOpacity style={styles.validateBtn} onPress={() => handleValidate(false)}>
+          <TouchableOpacity
+            style={[styles.validateBtn, saving && { opacity: 0.7 }]}
+            onPress={() => handleValidate(false)}
+            disabled={saving}
+          >
             <Ionicons name="checkmark-circle" size={22} color="#fff" style={{ marginRight: 8 }} />
             <Text style={styles.validateText}>{t.rankSubmit}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.top3Btn} onPress={() => handleValidate(true)}>
+          <TouchableOpacity
+            style={[styles.top3Btn, saving && { opacity: 0.7 }]}
+            onPress={() => handleValidate(true)}
+            disabled={saving}
+          >
             <Ionicons name="trophy" size={20} color={colors.text} style={{ marginRight: 8 }} />
             <Text style={styles.top3Text}>{t.rankSubmitTop3}</Text>
           </TouchableOpacity>
@@ -472,11 +626,27 @@ export default function RankGameScreen() {
       )}
       {alreadyRated && !isInTop3 && (
         <View style={[styles.actionButtons, { marginBottom: 8 }]}>
-          <TouchableOpacity style={styles.top3Btn} onPress={handleAddExistingToTop3}>
+          <TouchableOpacity
+            style={[styles.top3Btn, saving && { opacity: 0.7 }]}
+            onPress={handleAddExistingToTop3}
+            disabled={saving}
+          >
             <Ionicons name="trophy" size={20} color={colors.text} style={{ marginRight: 8 }} />
             <Text style={styles.top3Text}>{t.rankSubmitTop3}</Text>
           </TouchableOpacity>
         </View>
+      )}
+
+      {alreadyRated && (
+        <TouchableOpacity
+          style={[styles.removeBtn, saving && { opacity: 0.7 }]}
+          onPress={handleRemoveRating}
+          disabled={saving}
+          activeOpacity={0.75}
+        >
+          <Ionicons name="trash-outline" size={18} color="#E74C3C" style={{ marginRight: 8 }} />
+          <Text style={styles.removeBtnText}>Retirer cette note</Text>
+        </TouchableOpacity>
       )}
     </ScrollView>
 
@@ -529,7 +699,7 @@ export default function RankGameScreen() {
                   key={g.id}
                   style={styles.modalCard}
                   onPress={() => handleReplace(i)}
-                  disabled={swappingIndex !== null}
+                  disabled={swappingIndex !== null || saving}
                 >
                   <View style={{ width: 80, height: 110 }}>
                     {isSwapping ? (
@@ -552,7 +722,7 @@ export default function RankGameScreen() {
               );
             })}
           </View>
-          <TouchableOpacity style={styles.modalCancel} onPress={() => setTop3Modal(false)}>
+          <TouchableOpacity style={styles.modalCancel} onPress={() => { setTop3Modal(false); setSaving(false); }}>
             <Text style={styles.modalCancelText}>{t.rankCancel}</Text>
           </TouchableOpacity>
         </View>
@@ -579,7 +749,7 @@ const makeStyles = (c: any) => StyleSheet.create({
     position: 'absolute', bottom: 14, left: 16, right: 16,
     flexDirection: 'row', alignItems: 'flex-end', gap: 10,
   },
-  heroTitle: { flex: 1, fontSize: 22, fontWeight: '900', color: '#FFFFFF', fontFamily: 'Georgia', lineHeight: 28 },
+  heroTitle: { flex: 1, fontSize: 22, fontWeight: '900', color: '#FFFFFF', lineHeight: 28, letterSpacing: -0.5 },
   metaBadge: { width: 48, height: 48, borderRadius: 10, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   metaScore: { color: '#fff', fontSize: 20, fontWeight: '900' },
 
@@ -603,12 +773,25 @@ const makeStyles = (c: any) => StyleSheet.create({
   checkboxChecked: { backgroundColor: c.primary, borderColor: c.primary },
   checkboxLabel: { color: c.text, fontSize: 15, fontWeight: '700' },
 
+  // Hours played selector
+  hoursSection: { marginHorizontal: 16, marginTop: 18 },
+  hoursLabel: { color: c.textSecondary, fontSize: 13, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  hoursRow: { flexDirection: 'row', gap: 10 },
+  hoursBtn: { flex: 1, paddingVertical: 10, borderRadius: 12, borderWidth: 2, borderColor: c.textSecondary, alignItems: 'center', justifyContent: 'center', opacity: 0.6 },
+  hoursBtnSelected: { borderColor: c.primary, backgroundColor: c.primary + '22', opacity: 1 },
+  hoursBtnText: { color: c.textSecondary, fontSize: 13, fontWeight: '700' },
+  hoursBtnTextSelected: { color: c.primary },
+
   // Action buttons
   actionButtons: { marginHorizontal: 16, marginTop: 24, gap: 12 },
   validateBtn: { backgroundColor: '#2ECC71', borderRadius: 16, paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   validateText: { color: '#fff', fontWeight: '900', fontSize: 17, letterSpacing: 2 },
   top3Btn: { backgroundColor: c.primary, borderRadius: 16, paddingVertical: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   top3Text: { color: '#FFFFFF', fontWeight: '900', fontSize: 16, letterSpacing: 1 },
+
+  // Remove rating
+  removeBtn: { marginHorizontal: 16, marginTop: 8, marginBottom: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: '#E74C3C33' },
+  removeBtnText: { color: '#E74C3C', fontWeight: '700', fontSize: 15 },
 
   // Save edit
   saveEditBtn: { position: 'absolute', bottom: 24, left: 20, right: 20 },

@@ -25,6 +25,7 @@ import {
 } from 'firebase/auth';
 import { deleteDoc, doc } from 'firebase/firestore';
 import { auth, db } from './firebase';
+import { loadData, USER_KEYS } from './storage';
 
 // ─── Provider detection ───────────────────────────────────────────────────────
 
@@ -49,11 +50,32 @@ export function getAuthEmail(): string | null {
 async function applyCredential(credential: any): Promise<void> {
   const user = auth.currentUser;
   if (user?.isAnonymous) {
-    try {
-      await linkWithCredential(user, credential);
-      return; // same UID → all Firestore data preserved ✅
-    } catch (e: any) {
-      if (e.code !== 'auth/credential-already-in-use') throw e;
+    const [xp, ratings] = await Promise.all([
+      loadData(USER_KEYS.xp),
+      loadData(USER_KEYS.ratings),
+    ]);
+    const hasDataToSave = (xp && Number(xp) > 0) || (Array.isArray(ratings) && ratings.length > 0);
+
+    if (hasDataToSave) {
+      try {
+        await linkWithCredential(user, credential);
+        return; // same UID → all Firestore data preserved ✅
+      } catch (e: any) {
+        if (e.code === 'auth/credential-already-in-use' || e.code === 'auth/email-already-in-use') {
+          // Le compte Apple/Google existe déjà. Firebase place dans l'erreur un
+          // credential spécialement prévu pour terminer la connexion au compte
+          // existant. `e.credential` n'est pas une propriété publique fiable.
+          const existingCredential = OAuthProvider.credentialFromError(e) ?? credential;
+          await _firebaseSignOut(auth);
+          await signInWithCredential(auth, existingCredential);
+          return;
+        }
+        throw e;
+      }
+    } else {
+      // Le compte invité est totalement vide, on s'en fiche de le lier.
+      // On déconnecte l'invité anonyme d'abord pour éviter tout conflit de "credential consumed"
+      await auth.signOut();
     }
   }
   await signInWithCredential(auth, credential);
@@ -182,4 +204,3 @@ export async function deleteAccount(): Promise<void> {
     await deleteUser(user);
   }
 }
-

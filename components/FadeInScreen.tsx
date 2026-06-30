@@ -1,27 +1,22 @@
-import { useFocusEffect } from 'expo-router';
-import { useCallback } from 'react';
-import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { useEffect, useRef } from 'react';
+import { Animated, Dimensions } from 'react-native';
+
+const SCREEN_HEIGHT = Dimensions.get('window').height;
 
 export default function FadeInScreen({ children, style }: { children: React.ReactNode; style?: any }) {
-  const opacity = useSharedValue(0);
-  const translateY = useSharedValue(10);
+  const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
-  useFocusEffect(
-    useCallback(() => {
-      opacity.value = 0;
-      translateY.value = 10;
-      opacity.value = withTiming(1, { duration: 280, easing: Easing.out(Easing.cubic) });
-      translateY.value = withTiming(0, { duration: 280, easing: Easing.out(Easing.cubic) });
-    }, [])
-  );
-
-  const animStyle = useAnimatedStyle(() => ({
-    opacity: opacity.value,
-    transform: [{ translateY: translateY.value }],
-  }));
+  useEffect(() => {
+    Animated.spring(translateY, {
+      toValue: 0,
+      useNativeDriver: true,
+      tension: 65,
+      friction: 11,
+    }).start();
+  }, []);
 
   return (
-    <Animated.View style={[{ flex: 1 }, animStyle, style]}>
+    <Animated.View style={[{ flex: 1, transform: [{ translateY }] }, style]}>
       {children}
     </Animated.View>
   );

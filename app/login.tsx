@@ -45,12 +45,14 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState<'email' | 'google' | 'apple' | 'guest' | null>(null);
   const [loadingReset, setLoadingReset] = useState(false);
-  const [appleAvailable, setAppleAvailable] = useState(false);
+  const [appleAvailable, setAppleAvailable] = useState(Platform.OS === 'ios');
 
   useEffect(() => {
-    AppleAuthentication.isAvailableAsync()
-      .then((v) => { console.log('[Apple] isAvailableAsync:', v); setAppleAvailable(v); })
-      .catch((err) => { console.error('[Apple] isAvailableAsync error:', err); });
+    if (Platform.OS === 'ios') {
+      AppleAuthentication.isAvailableAsync()
+        .then((v) => { console.log('[Apple] isAvailableAsync:', v); setAppleAvailable(v); })
+        .catch((err) => { console.error('[Apple] isAvailableAsync error:', err); });
+    }
   }, []);
   const [error, setError] = useState('');
   const passwordRef = useRef<TextInput>(null);
@@ -73,9 +75,13 @@ export default function LoginScreen() {
         const token = GoogleAuthProvider.credentialFromResult(result)?.accessToken;
         if (token) await signInWithGoogleToken(token);
         await navigateAfterLogin();
-      } catch {
+      } catch (e: any) {
         setLoading(null);
-        setError(t.loginErrorGeneric);
+        if (e.code === 'auth/credential-already-in-use') {
+          setError(t.loginErrorCredentialAlreadyInUse);
+        } else {
+          setError(t.loginErrorGeneric);
+        }
       }
     } else {
       try {
@@ -87,7 +93,9 @@ export default function LoginScreen() {
         await navigateAfterLogin();
       } catch (e: any) {
         setLoading(null);
-        if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        if (e.code === 'auth/credential-already-in-use') {
+          setError(t.loginErrorCredentialAlreadyInUse);
+        } else if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
           setError(t.loginErrorGeneric);
         }
       }
@@ -105,7 +113,9 @@ export default function LoginScreen() {
     } catch (e: any) {
       setLoading(null);
       console.error('[Apple SignIn] error code:', e?.code, 'message:', e?.message, e);
-      if (e.code !== 'ERR_REQUEST_CANCELED' && e.code !== 'ERR_REQUEST_UNKNOWN') {
+      if (e.code === 'auth/credential-already-in-use') {
+        setError(t.loginErrorCredentialAlreadyInUse);
+      } else if (e.code !== 'ERR_REQUEST_CANCELED' && e.code !== 'ERR_REQUEST_UNKNOWN') {
         setError(t.loginErrorGeneric);
       }
     }
@@ -401,10 +411,17 @@ const makeStyles = (c: any) => StyleSheet.create({
     shadowColor: c.primary, shadowOpacity: 0.5, shadowRadius: 18, shadowOffset: { width: 0, height: 6 },
     elevation: 10,
   },
-  crystalV: { fontSize: 36, fontWeight: '900', color: '#FFFFFF', fontFamily: 'Georgia' },
-  title: { fontSize: 36, fontWeight: '900', color: c.text, letterSpacing: 2, fontFamily: 'Georgia' },
+  crystalV: { fontSize: 36, fontWeight: '900', color: '#FFFFFF' },
+  title: { fontSize: 36, fontWeight: '900', color: c.text, letterSpacing: -1 },
   titleAccent: { color: c.primary },
-  subtitle: { fontSize: 14, color: c.textSecondary, textAlign: 'center', lineHeight: 20 },
+  subtitle: {
+    fontFamily: 'Nunito_500Medium',
+    fontSize: 15,
+    color: c.textSecondary,
+    textAlign: 'center',
+    lineHeight: 21,
+    letterSpacing: 0.1,
+  },
 
   // Mode toggle
   modeToggle: {
@@ -456,4 +473,3 @@ const makeStyles = (c: any) => StyleSheet.create({
   guestBtn: { alignItems: 'center', paddingVertical: 10 },
   guestText: { color: c.textSecondary, fontSize: 14, fontWeight: '600', textDecorationLine: 'underline' },
 });
-

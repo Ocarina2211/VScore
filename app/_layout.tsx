@@ -1,25 +1,35 @@
-import * as Notifications from 'expo-notifications';
 import { Stack } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
+import { Nunito_500Medium, Nunito_700Bold, useFonts } from '@expo-google-fonts/nunito';
 import { useEffect } from 'react';
-import { AppState, Platform, StatusBar, StyleSheet, View } from 'react-native';
-import { I18nProvider } from '../contexts/I18nContext';
+import { Platform, StatusBar, StyleSheet, View } from 'react-native';
+import { I18nProvider, useResolvedLanguage } from '../contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../contexts/ThemeContext';
-import { getFriends, getReceivedRequests, syncListsFromFirestore, syncProfileFromFirestore, syncRatingsFromFirestore, syncRatingToFirestore } from '../services/community';
+import { syncListsFromFirestore, syncProfileFromFirestore, syncRatingsFromFirestore, syncRatingToFirestore } from '../services/community';
 import { auth } from '../services/firebase';
+import { configureNotificationHandler, registerPushTokenAsync } from '../services/notifications';
 import { loadData, saveData, USER_KEYS } from '../services/storage';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+SplashScreen.preventAutoHideAsync();
 
 function StackWithTheme() {
   const { colors, isDark } = useTheme();
+  const language = useResolvedLanguage();
+
+  useEffect(() => {
+    configureNotificationHandler();
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user && !user.isAnonymous) {
+        loadData(USER_KEYS.notificationsEnabled).then((enabled) => {
+          if (enabled !== false) registerPushTokenAsync(language).catch(() => {});
+        });
+      }
+    });
+    return unsubscribe;
+  }, [language]);
 
   useEffect(() => {
     // Re-sync ALL ratings to Firestore once auth is ready
@@ -51,6 +61,7 @@ function StackWithTheme() {
             lifespan: r.lifespan ?? 0,
             completed: r.completed ?? false,
             comment: r.comment,
+            hoursPlayed: r.hoursPlayed ?? undefined,
           });
           if (ok) {
             const idx = updatedRatings.findIndex((x) => x.id === r.id);
@@ -64,61 +75,6 @@ function StackWithTheme() {
       } catch {}
     })();
     });
-  }, []);
-
-  // Check for new friend requests / accepted friends when app becomes active
-  useEffect(() => {
-    const checkFriendNotifications = async () => {
-      if (!auth.currentUser || auth.currentUser.isAnonymous) return;
-      try {
-        const { status } = await Notifications.getPermissionsAsync();
-        if (status !== 'granted') return;
-
-        const [requests, friends] = await Promise.all([
-          getReceivedRequests().catch(() => [] as any[]),
-          getFriends().catch(() => [] as any[]),
-        ]);
-
-        // New friend requests
-        const lastReqCount = (await loadData(USER_KEYS.lastSeenRequestCount)) ?? 0;
-        if (requests.length > lastReqCount) {
-          const diff = requests.length - lastReqCount;
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: '👥 New friend request!',
-              body: diff === 1
-                ? 'You have a new friend request on VScore.'
-                : `You have ${diff} new friend requests on VScore.`,
-            },
-            trigger: null,
-          });
-        }
-        await saveData(USER_KEYS.lastSeenRequestCount, requests.length);
-
-        // Friend request accepted
-        const lastFriendCount = (await loadData(USER_KEYS.lastSeenFriendCount)) ?? -1;
-        if (lastFriendCount >= 0 && friends.length > lastFriendCount) {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: '🎉 Friend request accepted!',
-              body: 'Someone accepted your friend request on VScore.',
-            },
-            trigger: null,
-          });
-        }
-        if (lastFriendCount >= 0) {
-          await saveData(USER_KEYS.lastSeenFriendCount, friends.length);
-        } else {
-          // First time: just store, don't notify
-          await saveData(USER_KEYS.lastSeenFriendCount, friends.length);
-        }
-      } catch {}
-    };
-
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') checkFriendNotifications();
-    });
-    return () => subscription.remove();
   }, []);
 
   const stack = (
@@ -137,7 +93,8 @@ function StackWithTheme() {
       <Stack.Screen name="(tabs)" />
       <Stack.Screen name="game/[id]" options={{ animation: Platform.OS === 'web' ? 'none' : 'fade_from_bottom', animationDuration: 300 }} />
       <Stack.Screen name="rank/[id]" options={{ animation: Platform.OS === 'web' ? 'none' : 'fade_from_bottom', animationDuration: 300 }} />
-      <Stack.Screen name="ranks" />
+      <Stack.Screen name="settings" />
+      <Stack.Screen name="invite/[uid]" />
       <Stack.Screen name="success" options={{ animation: Platform.OS === 'web' ? 'none' : 'fade', animationDuration: 250 }} />
     </Stack>
   );
@@ -161,6 +118,17 @@ function StackWithTheme() {
 }
 
 export default function RootLayout() {
+  const [fontsLoaded, fontError] = useFonts({
+    Nunito_500Medium,
+    Nunito_700Bold,
+  });
+
+  useEffect(() => {
+    if (fontsLoaded || fontError) SplashScreen.hideAsync();
+  }, [fontsLoaded, fontError]);
+
+  if (!fontsLoaded && !fontError) return null;
+
   return (
     <I18nProvider>
       <ThemeProvider>
