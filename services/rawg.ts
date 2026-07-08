@@ -1,27 +1,35 @@
-import { RAWG_API_KEY, RAWG_BASE_URL } from '../constants/Games';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from './firebase';
+
+const rawgRequest = httpsCallable<
+  { path: string; params?: Record<string, string | number | boolean> },
+  any
+>(functions, 'rawgRequest');
 
 // ─── In-memory response cache (5 min TTL) ────────────────────────────────────
 const _cache = new Map<string, { data: any; ts: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-async function cachedFetch(url: string): Promise<any> {
-  const hit = _cache.get(url);
+async function cachedFetch(path: string, params: Record<string, string | number | boolean> = {}): Promise<any> {
+  const cacheKey = `${path}?${JSON.stringify(params)}`;
+  const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
-  const res = await fetch(url);
-  const data = await res.json();
-  _cache.set(url, { data, ts: Date.now() });
+  const response = await rawgRequest({ path, params });
+  const data = response.data;
+  _cache.set(cacheKey, { data, ts: Date.now() });
   return data;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const fetchGames = async (page = 1, search = '', ordering = '-metacritic', metacriticOnly = false, pageSize = 20) => {
-  const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
   const effectiveOrdering = search ? '' : ordering;
-  const orderingParam = effectiveOrdering ? `&ordering=${effectiveOrdering}` : '';
-  const metacriticParam = metacriticOnly ? '&metacritic=1-100' : '';
-  const data = await cachedFetch(
-    `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}${searchParam}${orderingParam}${metacriticParam}`
-  );
+  const data = await cachedFetch('/games', {
+    page_size: pageSize,
+    page,
+    ...(search ? { search } : {}),
+    ...(effectiveOrdering ? { ordering: effectiveOrdering } : {}),
+    ...(metacriticOnly ? { metacritic: '1-100' } : {}),
+  });
   const results = metacriticOnly
     ? (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 1000)
     : (data.results ?? []);
@@ -29,7 +37,7 @@ export const fetchGames = async (page = 1, search = '', ordering = '-metacritic'
 };
 
 export const fetchGameDetail = async (id: number, lang = 'en') => {
-  const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}?key=${RAWG_API_KEY}&lang=${lang}`);
+  const data = await cachedFetch(`/games/${id}`, { lang });
   return data;
 };
 
@@ -38,9 +46,12 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   // Fetch a larger batch sorted by release date to allow client-side re-scoring
   const batchSize = pageSize * 3;
-  const data = await cachedFetch(
-    `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${batchSize}&page=${page}&dates=${oneYearAgo},${today}&ordering=-released`
-  );
+  const data = await cachedFetch('/games', {
+    page_size: batchSize,
+    page,
+    dates: `${oneYearAgo},${today}`,
+    ordering: '-released',
+  });
   const raw = (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 5);
 
   // 70% recency (rank in release-sorted list) + 30% popularity (normalized added count)
@@ -55,24 +66,20 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
 };
 
 export const fetchGamesByGenre = async (genreSlug: string, page = 1, pageSize = 20) => {
-  const data = await cachedFetch(
-    `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}&genres=${genreSlug}&ordering=-metacritic`
-  );
+  const data = await cachedFetch('/games', { page_size: pageSize, page, genres: genreSlug, ordering: '-metacritic' });
   const results = data.results ?? [];
   return { results, nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchGamesByTag = async (tagSlug: string, page = 1, pageSize = 20) => {
-  const data = await cachedFetch(
-    `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}&tags=${tagSlug}&ordering=-metacritic`
-  );
+  const data = await cachedFetch('/games', { page_size: pageSize, page, tags: tagSlug, ordering: '-metacritic' });
   const results = data.results ?? [];
   return { results, nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchGameScreenshots = async (id: number): Promise<string[]> => {
   try {
-    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/screenshots?key=${RAWG_API_KEY}`);
+    const data = await cachedFetch(`/games/${id}/screenshots`);
     return (data.results ?? []).map((s: any) => s.image as string);
   } catch {
     return [];
@@ -81,7 +88,7 @@ export const fetchGameScreenshots = async (id: number): Promise<string[]> => {
 
 export const fetchGameSteamUrl = async (id: number): Promise<string | null> => {
   try {
-    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/stores?key=${RAWG_API_KEY}`);
+    const data = await cachedFetch(`/games/${id}/stores`);
     const steamStore = (data.results ?? []).find((entry: any) => {
       if (typeof entry?.url !== 'string') return false;
       try {
@@ -116,19 +123,22 @@ export const fetchGamesFiltered = async ({
   pageSize?: number;
   ordering?: string;
 }): Promise<{ results: any[]; nextPage: number | null }> => {
-  let url = `${RAWG_BASE_URL}/games?key=${RAWG_API_KEY}&page_size=${pageSize}&page=${page}&ordering=${ordering}`;
-  if (search) url += `&search=${encodeURIComponent(search)}`;
-  if (genreSlug) url += `&genres=${genreSlug}`;
-  if (platformId) url += `&platforms=${platformId}`;
-  if (tagSlug) url += `&tags=${tagSlug}`;
-  if (dates) url += `&dates=${dates}`;
-  const data = await cachedFetch(url);
+  const data = await cachedFetch('/games', {
+    page_size: pageSize,
+    page,
+    ordering,
+    ...(search ? { search } : {}),
+    ...(genreSlug ? { genres: genreSlug } : {}),
+    ...(platformId ? { platforms: platformId } : {}),
+    ...(tagSlug ? { tags: tagSlug } : {}),
+    ...(dates ? { dates } : {}),
+  });
   return { results: data.results ?? [], nextPage: data.next ? page + 1 : null };
 };
 
 export const fetchSimilarGames = async (id: number): Promise<any[]> => {
   try {
-    const data = await cachedFetch(`${RAWG_BASE_URL}/games/${id}/suggested?key=${RAWG_API_KEY}&page_size=8`);
+    const data = await cachedFetch(`/games/${id}/suggested`, { page_size: 8 });
     return data.results ?? [];
   } catch {
     return [];
