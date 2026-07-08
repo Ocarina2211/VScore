@@ -1,4 +1,3 @@
-export const RAWG_API_KEY = '9a4b7d0d354f407b97dbd8d3d2ed53b0';
 export const RAWG_BASE_URL = 'https://api.rawg.io/api';
 
 export const XP_PER_RATING = 200;

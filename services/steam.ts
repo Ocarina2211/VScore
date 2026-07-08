@@ -1,9 +1,13 @@
 // Steam Web API integration
 // API key: get one free at https://steamcommunity.com/dev/apikey
 
-const STEAM_API_KEY = '9CC7D52E8681F349437C17F10CFF5408';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from './firebase';
 
-const BASE = 'https://api.steampowered.com';
+const steamRequest = httpsCallable<{ operation: string; steamId?: string; vanityName?: string }, any>(
+  functions,
+  'steamRequest'
+);
 
 export interface SteamGame {
   appid: number;
@@ -17,13 +21,9 @@ export interface SteamGame {
  * Returns null if not found.
  */
 export async function resolveVanityUrl(vanityName: string): Promise<string | null> {
-  const url = `${BASE}/ISteamUser/ResolveVanityURL/v1/?key=${STEAM_API_KEY}&vanityurl=${encodeURIComponent(vanityName)}`;
   console.log('[Steam] resolveVanityUrl:', vanityName);
-  const res = await fetch(url);
-  const json = await res.json();
-  console.log('[Steam] vanity response:', JSON.stringify(json));
-  if (json.response?.success === 1) return json.response.steamid;
-  return null;
+  const response = await steamRequest({ operation: 'resolveVanityUrl', vanityName });
+  return response.data?.steamId ?? null;
 }
 
 /**
@@ -61,14 +61,9 @@ export async function parseSteamInput(input: string): Promise<string | null> {
  * Returns the player's display name or null.
  */
 export async function getSteamPlayerName(steamId: string): Promise<string | null> {
-  const url = `${BASE}/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${steamId}`;
   console.log('[Steam] getSteamPlayerName for:', steamId);
-  const res = await fetch(url);
-  const json = await res.json();
-  console.log('[Steam] player response:', JSON.stringify(json));
-  const players = json.response?.players;
-  if (players && players.length > 0) return players[0].personaname;
-  return null;
+  const response = await steamRequest({ operation: 'getPlayerName', steamId });
+  return response.data?.name ?? null;
 }
 
 /**
@@ -76,19 +71,8 @@ export async function getSteamPlayerName(steamId: string): Promise<string | null
  * Requires that the user's game list is public.
  */
 export async function getSteamOwnedGames(steamId: string): Promise<SteamGame[]> {
-  const url = `${BASE}/IPlayerService/GetOwnedGames/v1/?key=${STEAM_API_KEY}&steamid=${steamId}&include_appinfo=1&include_played_free_games=1&format=json`;
-  const res = await fetch(url);
-  const json = await res.json();
-  const games = json.response?.games;
-  if (!games) return [];
-  return games.map((g: any) => ({
-    appid: g.appid,
-    name: g.name,
-    playtime_forever: g.playtime_forever ?? 0,
-    img_icon_url: g.img_icon_url
-      ? `https://media.steampowered.com/steamcommunity/public/images/apps/${g.appid}/${g.img_icon_url}.jpg`
-      : '',
-  }));
+  const response = await steamRequest({ operation: 'getOwnedGames', steamId });
+  return response.data?.games ?? [];
 }
 
 /**

@@ -1,11 +1,16 @@
 const { initializeApp } = require('firebase-admin/app');
 const { FieldValue, getFirestore } = require('firebase-admin/firestore');
+const { HttpsError, onCall } = require('firebase-functions/v2/https');
+const { defineSecret } = require('firebase-functions/params');
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 
 initializeApp();
 const db = getFirestore();
 const REGION = 'europe-west1';
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const RAWG_API_KEY = defineSecret('RAWG_API_KEY');
+const STEAM_API_KEY = defineSecret('STEAM_API_KEY');
+const DEEPL_API_KEY = defineSecret('DEEPL_API_KEY');
 
 function isExpoPushToken(value) {
   return typeof value === 'string' && /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(value);
@@ -71,6 +76,87 @@ async function localizedContent(uid, french, english) {
   const snap = await db.collection('users').doc(uid).get();
   return snap.exists && snap.data().notificationLanguage === 'en' ? english : french;
 }
+
+exports.rawgRequest = onCall({ region: REGION, secrets: [RAWG_API_KEY] }, async (request) => {
+  const path = request.data?.path;
+  const params = request.data?.params ?? {};
+  if (typeof path !== 'string' || !path.startsWith('/') || path.includes('..')) {
+    throw new HttpsError('invalid-argument', 'Invalid RAWG path.');
+  }
+
+  const url = new URL(`https://api.rawg.io/api${path}`);
+  url.searchParams.set('key', RAWG_API_KEY.value());
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const response = await fetch(url);
+  if (!response.ok) throw new HttpsError('unavailable', `RAWG request failed: ${response.status}`);
+  return response.json();
+});
+
+exports.translateText = onCall({ region: REGION, secrets: [DEEPL_API_KEY] }, async (request) => {
+  const text = String(request.data?.text ?? '').slice(0, 500);
+  if (!text) return { text: '' };
+
+  const response = await fetch('https://api-free.deepl.com/v2/translate', {
+    method: 'POST',
+    headers: {
+      Authorization: `DeepL-Auth-Key ${DEEPL_API_KEY.value()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text: [text], target_lang: 'FR', source_lang: 'EN' }),
+  });
+  if (!response.ok) throw new HttpsError('unavailable', `DeepL request failed: ${response.status}`);
+
+  const data = await response.json();
+  return { text: data?.translations?.[0]?.text ?? text };
+});
+
+exports.steamRequest = onCall({ region: REGION, secrets: [STEAM_API_KEY] }, async (request) => {
+  const operation = request.data?.operation;
+  const steamId = String(request.data?.steamId ?? '');
+  const vanityName = String(request.data?.vanityName ?? '');
+  const key = STEAM_API_KEY.value();
+
+  if (operation === 'resolveVanityUrl') {
+    const url = `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key=${key}&vanityurl=${encodeURIComponent(vanityName)}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new HttpsError('unavailable', `Steam request failed: ${response.status}`);
+    const json = await response.json();
+    return { steamId: json.response?.success === 1 ? json.response.steamid : null };
+  }
+
+  if (operation === 'getPlayerName') {
+    const url = `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${encodeURIComponent(steamId)}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new HttpsError('unavailable', `Steam request failed: ${response.status}`);
+    const json = await response.json();
+    return { name: json.response?.players?.[0]?.personaname ?? null };
+  }
+
+  if (operation === 'getOwnedGames') {
+    const url = `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${encodeURIComponent(steamId)}&include_appinfo=1&include_played_free_games=1&format=json`;
+    const response = await fetch(url);
+    if (!response.ok) throw new HttpsError('unavailable', `Steam request failed: ${response.status}`);
+    const json = await response.json();
+    const games = json.response?.games ?? [];
+    return {
+      games: games.map((game) => ({
+        appid: game.appid,
+        name: game.name,
+        playtime_forever: game.playtime_forever ?? 0,
+        img_icon_url: game.img_icon_url
+          ? `https://media.steampowered.com/steamcommunity/public/images/apps/${game.appid}/${game.img_icon_url}.jpg`
+          : '',
+      })),
+    };
+  }
+
+  throw new HttpsError('invalid-argument', 'Invalid Steam operation.');
+});
 
 exports.onFriendRequestCreated = onDocumentCreated(
   { document: 'friend_requests/{requestId}', region: REGION },
