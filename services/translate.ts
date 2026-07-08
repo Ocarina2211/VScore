@@ -1,10 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
-import { db, functions } from './firebase';
+import { db } from './firebase';
 
+const DEEPL_API_KEY = 'bbdbcf5d-2cf1-4209-b1b0-634076361d26:fx';
+const DEEPL_URL = 'https://api-free.deepl.com/v2/translate';
 const LOCAL_CACHE_PREFIX = 'translate_cache_';
-const translateText = httpsCallable<{ text: string }, { text: string }>(functions, 'translateText');
 
 export async function translateToFrench(text: string, gameId?: number): Promise<string> {
   if (!text) return text;
@@ -33,8 +33,23 @@ export async function translateToFrench(text: string, gameId?: number): Promise<
 
   // 3. Call DeepL API (last resort)
   try {
-    const response = await translateText({ text: truncated });
-    const translated: string = response.data?.text ?? truncated;
+    const res = await fetch(DEEPL_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `DeepL-Auth-Key ${DEEPL_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: [truncated],
+        target_lang: 'FR',
+        source_lang: 'EN',
+      }),
+    });
+
+    if (!res.ok) return truncated;
+
+    const data = await res.json();
+    const translated: string = data?.translations?.[0]?.text ?? truncated;
 
     // Save to Firestore (shared) and local cache
     if (gameId) {
