@@ -486,7 +486,7 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.infoRow, { borderTopWidth: 1, borderTopColor: colors.background }]}>
             <Text style={styles.infoLabel}>Game data</Text>
-            <Text style={[styles.infoValue, { color: colors.primary }]}>Powered by RAWG.io</Text>
+            <Text style={[styles.infoValue, { color: colors.primary }]}>Game data provided by IGDB.com</Text>
           </View>
         </View>
       </View>

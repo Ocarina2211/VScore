@@ -6,12 +6,12 @@ import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import SkeletonBox from '../../components/SkeletonBox';
-import { getGameCover } from '../../constants/CustomCovers';
+import { getGameHeroCover } from '../../constants/CustomCovers';
 import { XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useResolvedLanguage, useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { fetchGameStats, GameStats, syncListsToFirestore, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
-import { fetchGameDetail, fetchGameScreenshots, fetchGameSteamUrl, fetchSimilarGames } from '../../services/rawg';
+import { fetchGameDetail, fetchGameScreenshots, fetchGameSteamUrl, fetchSimilarGames } from '../../services/games';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 // Synchronise la note, l'xp, le top3 et le profil (local + Firestore)
 async function handleRateAndTop3({
@@ -187,17 +187,17 @@ export default function GameDetailScreen() {
     fetchGameDetail(Number(id), lang).then(async (data) => {
       setGame(data);
       setLoading(false);
+      fetchGameStats(data.id, data.name).then(setCommunityStats);
+      fetchGameScreenshots(data.id).then(setScreenshots);
+      fetchGameSteamUrl(data.id).then(setSteamUrl);
+      fetchSimilarGames(data.id).then(setSimilarGames);
       if (lang === 'fr' && data?.description_raw) {
-        const desc = await translateToFrench(data.description_raw, Number(id));
+        const desc = await translateToFrench(data.description_raw, data.id);
         setTranslatedDesc(desc);
       } else {
         setTranslatedDesc(null);
       }
     });
-    fetchGameStats(Number(id)).then(setCommunityStats);
-    fetchGameScreenshots(Number(id)).then(setScreenshots);
-    fetchGameSteamUrl(Number(id)).then(setSteamUrl);
-    fetchSimilarGames(Number(id)).then(setSimilarGames);
     loadData(USER_KEYS.lists).then((lists: any[]) => {
       if (!lists) return;
       const item = lists.find((l: any) => l.gameId === Number(id));
@@ -260,7 +260,7 @@ export default function GameDetailScreen() {
 
         {/* Hero */}
         <View style={styles.heroWrapper}>
-          {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.hero} contentFit="cover" /> : null; })()}
+          {(() => { const src = getGameHeroCover(game.id, game.background_image); return src ? <Image source={src} style={styles.hero} contentFit="cover" cachePolicy="memory-disk" /> : null; })()}
           <LinearGradient
             colors={['transparent', colors.background]}
             style={styles.heroGradient}
@@ -456,7 +456,7 @@ export default function GameDetailScreen() {
         <TouchableOpacity style={styles.listIconBtn} onPress={() => setListModalVisible(true)}>
           <Ionicons name={listStatus ? 'bookmark' : 'bookmark-outline'} size={22} color={listStatus ? '#2ECC71' : colors.text} />
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.rankBtn, { flex: 1 }]} onPress={() => router.push(`/rank/${id}` as any)}>
+        <TouchableOpacity style={[styles.rankBtn, { flex: 1 }]} onPress={() => router.push(`/rank/${game.id}` as any)}>
           <Ionicons name="trophy" size={20} color={colors.text} style={{ marginRight: 8 }} />
           <Text style={styles.rankBtnText}>{t.gameRankBtn}</Text>
         </TouchableOpacity>

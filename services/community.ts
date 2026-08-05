@@ -85,6 +85,7 @@ import {
 } from 'firebase/firestore';
 
 import { auth, db } from './firebase';
+import { gameNameLookupCandidates, normalizeGameName } from './gameIdentity';
 import { loadData, saveData, USER_KEYS } from './storage';
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -130,6 +131,7 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
       ...scores,
       avg,
       name: gameName,
+      nameKey: normalizeGameName(gameName),
       background_image: gameImage,
       completed: completed ?? false,
       ...(comment ? { comment } : {}),
@@ -146,6 +148,7 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
         tx.set(statsRef, {
           gameId,
           name: gameName,
+          nameKey: normalizeGameName(gameName),
           background_image: gameImage,
           totalScore: avg,
           count: 1,
@@ -199,6 +202,7 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
           totalCompleted: Math.max(0, (data.totalCompleted ?? 0) + completedDelta),
           completedPercent: (Math.max(0, (data.totalCompleted ?? 0) + completedDelta) / safeCount) * 100,
           name: gameName,
+          nameKey: normalizeGameName(gameName),
           background_image: gameImage,
           updatedAt: serverTimestamp(),
         });
@@ -286,12 +290,56 @@ export interface GameStats {
   completedPercent?: number;
 }
 
-export async function fetchGameStats(gameId: number): Promise<GameStats | null> {
+type GameStatsDocument = GameStats & {
+  gameId?: number;
+  name?: string;
+  nameKey?: string;
+  background_image?: string;
+};
+
+function combineGameStats(stats: GameStatsDocument[]): GameStats | null {
+  const valid = stats.filter((entry) => (entry.count ?? 0) > 0);
+  const count = valid.reduce((sum, entry) => sum + (entry.count ?? 0), 0);
+  if (count === 0) return null;
+  const weighted = (field: keyof GameStats, fallback?: keyof GameStats) =>
+    valid.reduce((sum, entry) => {
+      const value = entry[field] ?? (fallback ? entry[fallback] : undefined) ?? 0;
+      return sum + Number(value) * (entry.count ?? 0);
+    }, 0) / count;
+  const totalCompleted = valid.reduce((sum, entry) => sum + (entry.totalCompleted ?? 0), 0);
+  return {
+    count,
+    avgScore: weighted('avgScore'),
+    avgGeneral: weighted('avgGeneral', 'avgScore'),
+    avgGraphics: weighted('avgGraphics'),
+    avgGameplay: weighted('avgGameplay'),
+    avgStory: weighted('avgStory'),
+    avgLifespan: weighted('avgLifespan'),
+    totalCompleted,
+    completedPercent: (totalCompleted / count) * 100,
+  };
+}
+
+export async function fetchGameStats(gameId: number, gameName = ''): Promise<GameStats | null> {
   try {
-    // auth already checked at app startup
-    const snap = await getDoc(doc(db, 'game_stats', String(gameId)));
-    if (!snap.exists()) return null;
-    return snap.data() as GameStats;
+    const documents = new Map<string, GameStatsDocument>();
+    const direct = await getDoc(doc(db, 'game_stats', String(gameId)));
+    if (direct.exists()) documents.set(direct.id, direct.data() as GameStatsDocument);
+
+    const nameKey = normalizeGameName(gameName);
+    if (gameName && nameKey) {
+      const nameCandidates = gameNameLookupCandidates(gameName);
+      const [exactName, normalizedName] = await Promise.all([
+        getDocs(query(collection(db, 'game_stats'), where('name', 'in', nameCandidates))),
+        getDocs(query(collection(db, 'game_stats'), where('nameKey', '==', nameKey))),
+      ]);
+      [...exactName.docs, ...normalizedName.docs].forEach((snapshot) => {
+        const data = snapshot.data() as GameStatsDocument;
+        if (normalizeGameName(data.name) === nameKey) documents.set(snapshot.id, data);
+      });
+    }
+
+    return combineGameStats(Array.from(documents.values()));
   } catch (e) {
     // console.warn('fetchGameStats failed:', e);
     return null;
@@ -300,35 +348,65 @@ export async function fetchGameStats(gameId: number): Promise<GameStats | null> 
 
 // ─── Fetch community top-rated games ─────────────────────────────────────────
 
-export interface CommunityGame {
+export interface CommunityGame extends GameStats {
   gameId: number;
   name: string;
   background_image: string;
-  avgScore: number;
-  count: number;
 }
 
 // ─── Fetch stats for multiple games in one query ────────────────────────────
 
-export async function fetchBatchGameStats(gameIds: number[]): Promise<Record<number, { avg: number; count: number }>> {
-  if (gameIds.length === 0) return {};
+export async function fetchBatchGameStats(
+  games: Array<number | { id: number; name?: string }>
+): Promise<Record<number, { avg: number; count: number }>> {
+  if (games.length === 0) return {};
   try {
-    // Firestore 'in' supports up to 30 items; chunk if needed
+    const requested = games.map((game) =>
+      typeof game === 'number' ? { id: game, name: '', nameKey: '' } : {
+        id: game.id,
+        name: game.name?.trim() ?? '',
+        nameKey: normalizeGameName(game.name),
+      }
+    );
+    const gameIds = Array.from(new Set(requested.map((game) => game.id)));
+    const names = Array.from(new Set(requested.flatMap((game) => gameNameLookupCandidates(game.name))));
+    const nameKeys = Array.from(new Set(requested.map((game) => game.nameKey).filter(Boolean)));
+    const documents = new Map<string, GameStatsDocument>();
+
+    // Firestore 'in' supports up to 30 values; chunk each lookup if needed.
     const chunks: number[][] = [];
     for (let i = 0; i < gameIds.length; i += 30) chunks.push(gameIds.slice(i, i + 30));
+    const nameChunks: string[][] = [];
+    for (let i = 0; i < names.length; i += 30) nameChunks.push(names.slice(i, i + 30));
+    const keyChunks: string[][] = [];
+    for (let i = 0; i < nameKeys.length; i += 30) keyChunks.push(nameKeys.slice(i, i + 30));
+
+    const collect = async (field: 'gameId' | 'name' | 'nameKey', values: Array<number | string>) => {
+      if (values.length === 0) return;
+      try {
+        const snapshot = await getDocs(query(collection(db, 'game_stats'), where(field, 'in', values)));
+        snapshot.docs.forEach((entry) => documents.set(entry.id, entry.data() as GameStatsDocument));
+      } catch {
+        // One compatibility lookup failing must not hide successful ID lookups.
+      }
+    };
+    await Promise.all([
+      ...chunks.map((chunk) => collect('gameId', chunk)),
+      ...nameChunks.map((chunk) => collect('name', chunk)),
+      ...keyChunks.map((chunk) => collect('nameKey', chunk)),
+    ]);
+
     const result: Record<number, { avg: number; count: number }> = {};
-    await Promise.all(chunks.map(async (chunk) => {
-      const q = query(collection(db, 'game_stats'), where('gameId', 'in', chunk));
-      const snap = await getDocs(q);
-      snap.docs.forEach((d) => {
-        const data = d.data();
-        const count: number = data.count ?? 0;
-        // Require at least 3 votes for a meaningful community badge
-        if (count >= 3) {
-          result[data.gameId] = { avg: data.avgGeneral ?? data.avgScore ?? 0, count };
-        }
-      });
-    }));
+    requested.forEach((game) => {
+      const matches = Array.from(documents.values()).filter((entry) =>
+        entry.gameId === game.id || (!!game.nameKey && normalizeGameName(entry.name) === game.nameKey)
+      );
+      const combined = combineGameStats(matches);
+      // Require at least 3 votes for a meaningful community badge.
+      if (combined && combined.count >= 3) {
+        result[game.id] = { avg: combined.avgGeneral ?? combined.avgScore, count: combined.count };
+      }
+    });
     return result;
   } catch (e) {
     return {};
@@ -347,7 +425,23 @@ export async function fetchCommunityTopRated(
       limit(60) // fetch a larger pool to allow shuffling for variety
     );
     const snap = await getDocs(q);
-    const results = snap.docs.map((d) => d.data() as CommunityGame);
+    const groups = new Map<string, GameStatsDocument[]>();
+    snap.docs.forEach((snapshot) => {
+      const data = snapshot.data() as GameStatsDocument;
+      const key = normalizeGameName(data.name) || `id:${data.gameId ?? snapshot.id}`;
+      groups.set(key, [...(groups.get(key) ?? []), data]);
+    });
+    const results: CommunityGame[] = Array.from(groups.values()).flatMap((entries) => {
+      const combined = combineGameStats(entries);
+      if (!combined) return [];
+      const representative = [...entries].sort((a, b) => (b.count ?? 0) - (a.count ?? 0))[0];
+      return [{
+        ...combined,
+        gameId: representative.gameId ?? 0,
+        name: representative.name ?? '',
+        background_image: representative.background_image ?? '',
+      }];
+    });
     // Sort by avgScore desc to build a pool of the best-rated games
     const sorted = results.sort((a, b) => (b.avgScore ?? 0) - (a.avgScore ?? 0));
     // Weighted random selection: higher avgScore → higher probability of appearing

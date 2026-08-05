@@ -6,12 +6,13 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Animated, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import SkeletonBox from '../../components/SkeletonBox';
-import { getGameCover } from '../../constants/CustomCovers';
+import { getGameHeroCover } from '../../constants/CustomCovers';
 import { getRank, XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { deleteRatingFromFirestore, fetchGameStats, GameStats, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
-import { fetchGameDetail } from '../../services/rawg';
+import { isSameGame } from '../../services/gameIdentity';
+import { fetchGameDetail } from '../../services/games';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 
 function StarIcon({ index, value, starColor, emptyColor }: { index: number; value: number; starColor: string; emptyColor: string }) {
@@ -132,29 +133,28 @@ export default function RankGameScreen() {
   };
 
   useEffect(() => {
-    fetchGameDetail(Number(id)).then((data) => {
+    Promise.all([
+      fetchGameDetail(Number(id)),
+      loadData(USER_KEYS.ratings),
+      loadData(USER_KEYS.top3),
+    ]).then(([data, storedRatings, top3]) => {
       setGame(data);
       setLoading(false);
-    });
-    fetchGameStats(Number(id)).then(setCommunityStats);
-    loadData(USER_KEYS.ratings).then((ratings) => {
-      if (!ratings) return;
-      const existing = ratings.find((r: any) => r.id === Number(id));
-      if (!existing) return;
-      setGeneral(existing.general ?? 0);
-      setGraphics(existing.graphics ?? 0);
-      setGameplay(existing.gameplay ?? 0);
-      setStory(existing.story ?? existing.soundtrack ?? 0);
-      setLifespan(existing.lifespan ?? 0);
-      setCompleted(existing.completed ?? false);
-      setComment(existing.comment ?? '');
-      setHoursPlayed(existing.hoursPlayed ?? null);
-      savedRef.current = existing;
-      setAlreadyRated(true);
-    });
-    loadData(USER_KEYS.top3).then((top3) => {
-      if (!top3) return;
-      setIsInTop3(top3.some((g: any) => g.id === Number(id)));
+      fetchGameStats(data.id, data.name).then(setCommunityStats);
+      const existing = (storedRatings ?? []).find((rating: any) => isSameGame(rating, data));
+      if (existing) {
+        setGeneral(existing.general ?? 0);
+        setGraphics(existing.graphics ?? 0);
+        setGameplay(existing.gameplay ?? 0);
+        setStory(existing.story ?? existing.soundtrack ?? 0);
+        setLifespan(existing.lifespan ?? 0);
+        setCompleted(existing.completed ?? false);
+        setComment(existing.comment ?? '');
+        setHoursPlayed(existing.hoursPlayed ?? null);
+        savedRef.current = existing;
+        setAlreadyRated(true);
+      }
+      setIsInTop3((top3 ?? []).some((entry: any) => isSameGame(entry, data)));
     });
   }, [id]);
 
@@ -171,13 +171,13 @@ export default function RankGameScreen() {
     if (savedRef.current) savedRef.current = { ...savedRef.current, ...patch };
     (async () => {
       const ratings = (await loadData(USER_KEYS.ratings)) || [];
-      const i = ratings.findIndex((r: any) => r.id === game.id);
+      const i = ratings.findIndex((r: any) => isSameGame(r, game));
       if (i < 0) return;
       ratings[i] = { ...ratings[i], ...patch, synced: false };
       await saveData(USER_KEYS.ratings, ratings);
       savedRef.current = ratings[i];
       syncRatingToFirestore({
-        gameId: game.id, gameName: game.name, gameImage: game.background_image,
+        gameId: ratings[i].id, gameName: game.name, gameImage: game.background_image,
         general: ratings[i].general ?? 0, graphics: ratings[i].graphics ?? 0,
         gameplay: ratings[i].gameplay ?? 0, story: ratings[i].story ?? 0,
         lifespan: ratings[i].lifespan ?? 0, completed: ratings[i].completed ?? false,
@@ -185,7 +185,7 @@ export default function RankGameScreen() {
       }).then(async (ok) => {
         if (!ok) return;
         const stored = (await loadData(USER_KEYS.ratings)) || [];
-        const si = stored.findIndex((r: any) => r.id === game.id);
+        const si = stored.findIndex((r: any) => isSameGame(r, game));
         if (si >= 0) { stored[si] = { ...stored[si], synced: true }; await saveData(USER_KEYS.ratings, stored); }
       });
     })();
@@ -215,15 +215,15 @@ export default function RankGameScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSaving(true);
     const existing = savedRef.current;
-    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existing?.ratedAt ?? Date.now() };
+    const rating = { id: existing?.id ?? game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existing?.ratedAt ?? Date.now() };
     const ratings = await loadData(USER_KEYS.ratings) || [];
-    const idx = ratings.findIndex((r: any) => r.id === game.id);
+    const idx = ratings.findIndex((r: any) => isSameGame(r, game));
     if (idx >= 0) ratings[idx] = rating; else ratings.push(rating);
     await saveData(USER_KEYS.ratings, ratings);
-    const synced = await syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined });
+    const synced = await syncRatingToFirestore({ gameId: rating.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined });
     if (synced) {
       const updatedRatings = await loadData(USER_KEYS.ratings) || [];
-      const si = updatedRatings.findIndex((r: any) => r.id === game.id);
+      const si = updatedRatings.findIndex((r: any) => isSameGame(r, game));
       if (si >= 0) { updatedRatings[si] = { ...updatedRatings[si], synced: true }; await saveData(USER_KEYS.ratings, updatedRatings); }
     }
     savedRef.current = rating;
@@ -252,27 +252,27 @@ export default function RankGameScreen() {
     const xp = await loadData(USER_KEYS.xp) || 0;
     const top3 = await loadData(USER_KEYS.top3) || [];
 
-    const existingRating = (await loadData(USER_KEYS.ratings) || []).find((r: any) => r.id === game.id);
-    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existingRating?.ratedAt ?? Date.now() };
+    const existingRating = (await loadData(USER_KEYS.ratings) || []).find((r: any) => isSameGame(r, game));
+    const rating = { id: existingRating?.id ?? game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existingRating?.ratedAt ?? Date.now() };
 
     // Sync to Firestore (non-blocking) and mark as synced on success
-    syncRatingToFirestore({ gameId: game.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined })
+    syncRatingToFirestore({ gameId: rating.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined })
       .then(async (ok) => {
         if (ok) {
           const stored = await loadData(USER_KEYS.ratings) || [];
-          const si = stored.findIndex((r: any) => r.id === game.id);
+          const si = stored.findIndex((r: any) => isSameGame(r, game));
           if (si >= 0) { stored[si] = { ...stored[si], synced: true }; await saveData(USER_KEYS.ratings, stored); }
         }
       });
 
-    const existingIndex = ratings.findIndex((r: any) => r.id === game.id);
+    const existingIndex = ratings.findIndex((r: any) => isSameGame(r, game));
     if (existingIndex >= 0) ratings[existingIndex] = rating;
     else ratings.push(rating);
 
     await saveData(USER_KEYS.ratings, ratings);
 
     if (addToTop3) {
-      const alreadyIn = top3.some((g: any) => g.id === game.id);
+      const alreadyIn = top3.some((g: any) => isSameGame(g, game));
       if (!alreadyIn && top3.length >= 3) {
         // Top 3 full — show replacement popup
         setPendingRating(rating);
@@ -289,7 +289,7 @@ export default function RankGameScreen() {
         if (levelUp) router.setParams({ pendingLevelUp: levelUp });
         return;
       }
-      const newTop3 = [...top3.filter((g: any) => g.id !== game.id), rating].slice(-3);
+      const newTop3 = [...top3.filter((g: any) => !isSameGame(g, game)), rating].slice(-3);
       await saveData(USER_KEYS.top3, newTop3);
       const oldRank = getRank(xp);
       const newXP = xp + XP_PER_RATING + XP_PER_TOP3;
@@ -318,10 +318,10 @@ export default function RankGameScreen() {
       if (isDirty) await handleSaveEdit();
       const rating = savedRef.current ?? { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment };
       const top3 = await loadData(USER_KEYS.top3) || [];
-      const alreadyIn = top3.some((g: any) => g.id === game.id);
+      const alreadyIn = top3.some((g: any) => isSameGame(g, game));
       if (alreadyIn) {
         // Update the entry in top 3 without extra XP
-        const newTop3 = top3.map((g: any) => g.id === game.id ? rating : g);
+        const newTop3 = top3.map((g: any) => isSameGame(g, game) ? rating : g);
         await saveData(USER_KEYS.top3, newTop3);
         setIsInTop3(true);
         const currentXp = await loadData(USER_KEYS.xp) || 0;
@@ -404,7 +404,8 @@ export default function RankGameScreen() {
             setSaving(true);
             try {
               const ratings: any[] = (await loadData(USER_KEYS.ratings)) ?? [];
-              const newRatings = ratings.filter((r: any) => r.id !== Number(id));
+              const ratingToRemove = ratings.find((rating: any) => isSameGame(rating, game));
+              const newRatings = ratings.filter((rating: any) => !isSameGame(rating, game));
               await saveData(USER_KEYS.ratings, newRatings);
 
               let xpLost = XP_PER_RATING;
@@ -412,7 +413,7 @@ export default function RankGameScreen() {
               let newTop3 = top3;
               if (isInTop3) {
                 xpLost += XP_PER_TOP3;
-                newTop3 = top3.filter((g: any) => g.id !== Number(id));
+                newTop3 = top3.filter((entry: any) => !isSameGame(entry, game));
                 await saveData(USER_KEYS.top3, newTop3);
               }
 
@@ -425,7 +426,7 @@ export default function RankGameScreen() {
               const profile = (await loadData(USER_KEYS.profile)) ?? {};
               await saveData(USER_KEYS.profile, { ...profile, _updatedAt: Date.now() });
 
-              deleteRatingFromFirestore(Number(id));
+              deleteRatingFromFirestore(ratingToRemove?.id ?? Number(id));
               syncProfileToCloud(newXP, newTop3);
 
               router.back();
@@ -464,7 +465,7 @@ export default function RankGameScreen() {
 
       {/* Hero */}
       <View style={styles.heroWrapper}>
-        {(() => { const src = getGameCover(game.id, game.background_image); return src ? <Image source={src} style={styles.heroImage} contentFit="cover" /> : null; })()}
+        {(() => { const src = getGameHeroCover(game.id, game.background_image); return src ? <Image source={src} style={styles.heroImage} contentFit="cover" cachePolicy="memory-disk" /> : null; })()}
         <LinearGradient colors={['transparent', colors.background]} style={styles.heroGradient} />
         <TouchableOpacity style={styles.back} onPress={() => router.back()}>
           <Ionicons name="chevron-back" size={22} color="#FFFFFF" />

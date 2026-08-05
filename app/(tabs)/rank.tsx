@@ -7,7 +7,7 @@ import { ActivityIndicator, FlatList, StyleSheet, Text, TextInput, TouchableOpac
 import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { fetchGames, fetchRecommendedGames } from '../../services/rawg';
+import { fetchGames, fetchRecommendedGames } from '../../services/games';
 import { loadData, USER_KEYS } from '../../services/storage';
 
 export default function RankScreen() {
@@ -56,7 +56,7 @@ export default function RankScreen() {
       setIsPersonalized(personalized);
       setGenreLabel(label);
     } else {
-      // Fallback: top Metacritic
+      // Fallback: top external-critic scores
       const page = reset ? 1 : (nextPage ?? 1);
       const data = await fetchGames(page, '', '-metacritic', true, 20);
       setGames((prev) => reset ? data.results : [...prev, ...data.results]);

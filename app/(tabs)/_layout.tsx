@@ -10,10 +10,7 @@ export default function TabLayout() {
   return (
     <NativeTabs
       iconColor={{ default: colors.textSecondary, selected: colors.primary }}
-      labelStyle={{
-        default: { color: colors.textSecondary, fontSize: 10, fontWeight: '600' },
-        selected: { color: colors.primary, fontSize: 10, fontWeight: '700' },
-      }}
+      labelStyle={{ color: colors.textSecondary, fontSize: 10, fontWeight: '600' }}
       minimizeBehavior="never"
       tintColor={colors.primary}
     >

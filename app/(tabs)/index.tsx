@@ -9,7 +9,8 @@ import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { fetchBatchGameStats, fetchCommunityTopRated } from '../../services/community';
-import { fetchGames, fetchGamesByGenre, fetchGamesByTag, fetchGamesFiltered, fetchRecentGames, fetchRecommendedGames } from '../../services/rawg';
+import { gameNameSet, normalizeGameName } from '../../services/gameIdentity';
+import { fetchGames, fetchGamesByGenre, fetchGamesByTag, fetchGamesFiltered, fetchRecentGames, fetchRecommendedGames, resolveGamesByNames } from '../../services/games';
 import { loadData, USER_KEYS } from '../../services/storage';
 
 
@@ -57,7 +58,7 @@ const SECTION_DEFS: SectionDef[] = [
   { id: 'sports',        title: '⚽ Sports',                        genre: 'sports',                  ordering: '-metacritic' },
   { id: 'fighting',      title: '🥊 Fighting',                      genre: 'fighting',                ordering: '-metacritic' },
   { id: 'racing',        title: '🏎️  Racing',                       genre: 'racing',                  ordering: '-metacritic' },
-  { id: 'top_rated',     title: '⭐ Top rated (Metacritic)',         genre: null,                      ordering: '-metacritic' },
+  { id: 'top_rated',     title: '⭐ Top rated by critics',           genre: null,                      ordering: '-metacritic' },
   { id: 'mmo',           title: '👾 MMO & Multiplayer',             genre: 'massively-multiplayer',   ordering: '-metacritic' },
   { id: 'casual',        title: '🎲 Casual & Party Games',          genre: 'casual',                  ordering: '-metacritic' },
   { id: 'arcade',        title: '🕹️  Arcade & Retro',              genre: 'arcade',                  ordering: '-metacritic' },
@@ -125,6 +126,7 @@ export default function HomeScreen() {
   const [gameStatsMap, setGameStatsMap] = useState<Record<number, { avg: number; count: number }>>({});
   const [metacriticCacheMap, setMetacriticCacheMap] = useState<Record<number, number>>({});;
   const [ratedIds, setRatedIds] = useState<Set<number>>(new Set());
+  const [ratedNames, setRatedNames] = useState<Set<string>>(new Set());
   const [hideRated, setHideRated] = useState(false);
   const [filteredGamesMap, setFilteredGamesMap] = useState<Record<string, any[]>>({});
   const [filterLoadingMap, setFilterLoadingMap] = useState<Record<string, boolean>>({});
@@ -142,6 +144,7 @@ export default function HomeScreen() {
       loadData(USER_KEYS.ratings).then((ratings: any[]) => {
         const ids = new Set<number>((ratings ?? []).map((r) => r.id));
         setRatedIds(ids);
+        setRatedNames(gameNameSet(ratings ?? []));
         // Refresh recommended section when ratings count changes
         const count = (ratings ?? []).length;
         if (count !== recommendedLastCountRef.current) {
@@ -176,28 +179,34 @@ export default function HomeScreen() {
 
   const doSearch = async (text: string) => {
     setSearching(true);
-    const [byRelevance, byPopularity] = await Promise.all([
-      fetchGames(1, text, ''),
-      fetchGames(1, text, '-added'),
-    ]);
-    const scoreMap = new Map<number, number>();
-    const addScore = (results: any[], weight: number) => {
-      results.forEach((g, i) => {
-        const s = (results.length - i) * weight;
-        scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + s);
+    try {
+      const [byRelevance, byPopularity] = await Promise.all([
+        fetchGames(1, text, ''),
+        fetchGames(1, text, '-added'),
+      ]);
+      const scoreMap = new Map<number, number>();
+      const addScore = (results: any[], weight: number) => {
+        results.forEach((g, i) => {
+          const s = (results.length - i) * weight;
+          scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + s);
+        });
+      };
+      addScore(byRelevance.results, 1.5);
+      addScore(byPopularity.results, 1);
+      const seen = new Set<number>();
+      const merged = [...byRelevance.results, ...byPopularity.results].filter((g) => {
+        if (seen.has(g.id)) return false;
+        seen.add(g.id);
+        return true;
       });
-    };
-    addScore(byRelevance.results, 1.5);
-    addScore(byPopularity.results, 1);
-    const seen = new Set<number>();
-    const merged = [...byRelevance.results, ...byPopularity.results].filter((g) => {
-      if (seen.has(g.id)) return false;
-      seen.add(g.id);
-      return true;
-    });
-    merged.sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
-    setSearchResults(merged);
-    setSearching(false);
+      merged.sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
+      setSearchResults(merged);
+    } catch (error) {
+      console.warn('[Home] Search failed:', error instanceof Error ? error.message : error);
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
   };
 
   const handleClear = () => {
@@ -241,6 +250,9 @@ export default function HomeScreen() {
         pageSize: 20,
       });
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: data.results }));
+      fetchBatchGameStats(data.results).then((stats) =>
+        setGameStatsMap((prev) => ({ ...prev, ...stats }))
+      );
     } catch {
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: [] }));
     } finally {
@@ -253,9 +265,21 @@ export default function HomeScreen() {
     loadedRef.current.add(def.id);
     updateSection(def.id, { loading: true });
 
+    try {
+
     if (def.id === 'community') {
       const communityGames = await fetchCommunityTopRated(1, 20);
-      const games = communityGames.map((g) => ({ ...g, id: g.gameId }));
+      const resolvedByName = await resolveGamesByNames(communityGames.map((game) => game.name));
+      const games = communityGames.map((communityGame) => {
+        const catalogGame = resolvedByName.get(normalizeGameName(communityGame.name));
+        return catalogGame
+          ? { ...catalogGame, ...communityGame, id: catalogGame.id, background_image: catalogGame.background_image || communityGame.background_image }
+          : { ...communityGame, id: communityGame.gameId };
+      });
+      const communityStats = Object.fromEntries(
+        games.map((game) => [game.id, { avg: game.avgGeneral ?? game.avgScore ?? 0, count: game.count ?? 0 }])
+      );
+      setGameStatsMap((prev) => ({ ...prev, ...communityStats }));
       nextPageRef.current['community'] = null;
       updateSection('community', { games, loading: false });
       return;
@@ -277,7 +301,14 @@ export default function HomeScreen() {
         return;
       }
       const { getFriendsTopGames } = await import('../../services/community');
-      const games = await getFriendsTopGames();
+      const friendGames = await getFriendsTopGames();
+      const resolvedByName = await resolveGamesByNames(friendGames.map((game) => game.name));
+      const games = friendGames.map((friendGame) => {
+        const catalogGame = resolvedByName.get(normalizeGameName(friendGame.name));
+        return catalogGame
+          ? { ...catalogGame, ...friendGame, id: catalogGame.id, background_image: catalogGame.background_image || friendGame.background_image }
+          : friendGame;
+      });
       nextPageRef.current['friends_liked'] = null;
       updateSection('friends_liked', { games, loading: false });
       return;
@@ -291,7 +322,7 @@ export default function HomeScreen() {
       updateSection('trending', { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
       return;
@@ -303,7 +334,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else if (def.tag) {
@@ -312,7 +343,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else if (def.id === 'recent') {
@@ -321,7 +352,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else {
@@ -330,9 +361,13 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
+    }
+    } catch (error) {
+      console.warn(`[Home] Failed to load section ${def.id}:`, error instanceof Error ? error.message : error);
+      updateSection(def.id, { games: [], loading: false, loadingMore: false });
     }
   }, [updateSection, fetchFilteredForSection, cacheMetacritics]);
 
@@ -422,25 +457,34 @@ export default function HomeScreen() {
     loadingMoreRef.current.add(sectionId);
     updateSection(sectionId, { loadingMore: true });
     const def = SECTION_DEFS.find((d) => d.id === sectionId)!;
-    let data: { results: any[]; nextPage: number | null };
-    if (def.genre) {
-      data = await fetchGamesByGenre(def.genre, currentNextPage, 20);
-    } else if (def.tag) {
-      data = await fetchGamesByTag(def.tag, currentNextPage, 20);
-    } else if (def.id === 'recent') {
-      data = await fetchRecentGames(currentNextPage, 20);
-    } else {
-      data = await fetchGames(currentNextPage, '', def.ordering, false, 20);
+    try {
+      let data: { results: any[]; nextPage: number | null };
+      if (def.genre) {
+        data = await fetchGamesByGenre(def.genre, currentNextPage, 20);
+      } else if (def.tag) {
+        data = await fetchGamesByTag(def.tag, currentNextPage, 20);
+      } else if (def.id === 'recent') {
+        data = await fetchRecentGames(currentNextPage, 20);
+      } else {
+        data = await fetchGames(currentNextPage, '', def.ordering, false, 20);
+      }
+      nextPageRef.current[sectionId] = data.nextPage;
+      fetchBatchGameStats(data.results).then((stats) =>
+        setGameStatsMap((prev) => ({ ...prev, ...stats }))
+      );
+      setSections((prev) =>
+        prev.map((s) =>
+          s.id === sectionId
+            ? { ...s, games: [...s.games, ...data.results], loadingMore: false }
+            : s
+        )
+      );
+    } catch (error) {
+      console.warn(`[Home] Failed to load more games for ${sectionId}:`, error instanceof Error ? error.message : error);
+      updateSection(sectionId, { loadingMore: false });
+    } finally {
+      loadingMoreRef.current.delete(sectionId);
     }
-    nextPageRef.current[sectionId] = data.nextPage;
-    loadingMoreRef.current.delete(sectionId);
-    setSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId
-          ? { ...s, games: [...s.games, ...data.results], loadingMore: false }
-          : s
-      )
-    );
   };
 
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
@@ -473,7 +517,11 @@ export default function HomeScreen() {
       displayGames = section.games;
     }
 
-    if (hideRated) displayGames = displayGames.filter((g: any) => !ratedIds.has(g.id));
+    if (hideRated) {
+      displayGames = displayGames.filter(
+        (g: any) => !ratedIds.has(g.id) && !ratedNames.has(normalizeGameName(g.name))
+      );
+    }
     return (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>{t.sections[section.id] ?? section.title}</Text>
@@ -506,7 +554,7 @@ export default function HomeScreen() {
                 const vscoreStat = gameStatsMap[item.id];
                 const vscore = vscoreStat?.avg;
                 const meta = item.metacritic ?? metacriticCacheMap[item.id];
-                const isRated = ratedIds.has(item.id);
+                const isRated = ratedIds.has(item.id) || ratedNames.has(normalizeGameName(item.name));
                 const isFriendsSection = section.id === 'friends_liked';
                 return (
                   <PressableCard
@@ -549,7 +597,7 @@ export default function HomeScreen() {
         )}
       </View>
     );
-  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, ratedIds, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap]);
+  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, ratedIds, ratedNames, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap]);
 
   const searchBar = (
     <View style={styles.searchBar}>
@@ -663,7 +711,9 @@ export default function HomeScreen() {
         ) : (
           <FlatList
             key="search"
-            data={hideRated ? searchResults.filter((g) => !ratedIds.has(g.id)) : searchResults}
+            data={hideRated
+              ? searchResults.filter((g) => !ratedIds.has(g.id) && !ratedNames.has(normalizeGameName(g.name)))
+              : searchResults}
             keyExtractor={(item) => item.id.toString()}
             numColumns={2}
             contentContainerStyle={styles.gridList}

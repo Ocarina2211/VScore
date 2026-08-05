@@ -7,7 +7,8 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 async function run(request: Request): Promise<Response> {
 	const ctx = createExecutionContext();
 	const response = await worker.fetch(request, env as Env & {
-		RAWG_API_KEY: string;
+		IGDB_CLIENT_ID: string;
+		IGDB_CLIENT_SECRET: string;
 		STEAM_API_KEY: string;
 		DEEPL_API_KEY: string;
 		FIREBASE_PROJECT_ID: string;
@@ -24,7 +25,7 @@ describe("VScore API worker", () => {
 	});
 
 	it("answers CORS preflight requests", async () => {
-		const response = await run(new IncomingRequest("https://example.com/rawg/games", { method: "OPTIONS" }));
+		const response = await run(new IncomingRequest("https://example.com/igdb/games", { method: "OPTIONS" }));
 		expect(response.status).toBe(204);
 		expect(response.headers.get("access-control-allow-origin")).toBe("*");
 	});
@@ -35,8 +36,8 @@ describe("VScore API worker", () => {
 		expect(await response.json()).toEqual({ error: "Route not found." });
 	});
 
-	it("protects RAWG routes with Firebase authentication", async () => {
-		const response = await run(new IncomingRequest("https://example.com/rawg/games?redirect=https://example.org"));
+	it("protects IGDB routes with Firebase authentication", async () => {
+		const response = await run(new IncomingRequest("https://example.com/igdb/games?redirect=https://example.org"));
 		expect(response.status).toBe(401);
 		expect(await response.json()).toEqual({ error: "Authentication required." });
 	});

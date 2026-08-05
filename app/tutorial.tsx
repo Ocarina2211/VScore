@@ -148,7 +148,7 @@ function SlideCard({ colors }: { colors: any }) {
             <Image source={require('../assets/images/covers/zeldabotw.jpg')} style={realCardStyles.cover} resizeMode="cover" />
             {/* Gradient overlay */}
             <View style={realCardStyles.gradient} />
-            {/* Metacritic badge — top right */}
+            {/* IGDB external-critic score badge — top right */}
             <View style={[realCardStyles.metaBadge, { borderColor: colors.primaryLight }]}>
               <Text style={realCardStyles.metaText}>98</Text>
             </View>
@@ -174,7 +174,7 @@ function SlideCard({ colors }: { colors: any }) {
                   <Text style={[calloutStyles.badgeText, { color: '#fff' }]}>98</Text>
                 </View>
               </View>
-              <Text style={[calloutStyles.calloutTitle, { color: '#00C853', marginTop: 4 }]}>Metacritic</Text>
+              <Text style={[calloutStyles.calloutTitle, { color: '#00C853', marginTop: 4 }]}>{t.profileSortMeta}</Text>
               <Text style={[calloutStyles.calloutDesc, { color: colors.textSecondary }]}>{t.tutorialCardLegendMeta}</Text>
             </View>
 

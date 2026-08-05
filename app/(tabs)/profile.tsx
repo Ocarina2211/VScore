@@ -17,7 +17,7 @@ import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { getReceivedRequests, isPseudoTaken, syncPublicProfile } from '../../services/community';
 import { auth, db } from '../../services/firebase';
-import { fetchGames } from '../../services/rawg';
+import { fetchGames } from '../../services/games';
 import { getSteamOwnedGames, SteamGame } from '../../services/steam';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
 
@@ -661,7 +661,7 @@ export default function ProfileScreen() {
                           if (match) {
                             router.push(`/game/${match.id}` as any);
                           } else {
-                            Alert.alert('', 'Game not found on RAWG database.');
+                            Alert.alert('', 'Game not found in the IGDB catalog.');
                           }
                         } catch {
                           Alert.alert('', 'Search error.');

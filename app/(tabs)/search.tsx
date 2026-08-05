@@ -6,7 +6,7 @@ import { ActivityIndicator, FlatList, Image, ScrollView, StyleSheet, Text, TextI
 import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { fetchGames, fetchGamesFiltered } from '../../services/rawg';
+import { fetchGames, fetchGamesFiltered } from '../../services/games';
 
 const PLATFORMS = [
   { label: 'PC', id: 4 },

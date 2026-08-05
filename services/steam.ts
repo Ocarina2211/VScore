@@ -1,9 +1,5 @@
-// Steam Web API integration
-// API key: get one free at https://steamcommunity.com/dev/apikey
-
-const STEAM_API_KEY = '9CC7D52E8681F349437C17F10CFF5408';
-
-const BASE = 'https://api.steampowered.com';
+// Steam Web API integration through the authenticated VScore Worker.
+import { apiFetch } from './api';
 
 export interface SteamGame {
   appid: number;
@@ -17,10 +13,8 @@ export interface SteamGame {
  * Returns null if not found.
  */
 export async function resolveVanityUrl(vanityName: string): Promise<string | null> {
-  const url = `${BASE}/ISteamUser/ResolveVanityURL/v1/?key=${STEAM_API_KEY}&vanityurl=${encodeURIComponent(vanityName)}`;
   console.log('[Steam] resolveVanityUrl:', vanityName);
-  const res = await fetch(url);
-  const json = await res.json();
+  const json = await apiFetch<any>(`/steam/resolve?vanity=${encodeURIComponent(vanityName)}`);
   console.log('[Steam] vanity response:', JSON.stringify(json));
   if (json.response?.success === 1) return json.response.steamid;
   return null;
@@ -61,10 +55,8 @@ export async function parseSteamInput(input: string): Promise<string | null> {
  * Returns the player's display name or null.
  */
 export async function getSteamPlayerName(steamId: string): Promise<string | null> {
-  const url = `${BASE}/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_API_KEY}&steamids=${steamId}`;
   console.log('[Steam] getSteamPlayerName for:', steamId);
-  const res = await fetch(url);
-  const json = await res.json();
+  const json = await apiFetch<any>(`/steam/player?steamId=${encodeURIComponent(steamId)}`);
   console.log('[Steam] player response:', JSON.stringify(json));
   const players = json.response?.players;
   if (players && players.length > 0) return players[0].personaname;
@@ -76,9 +68,7 @@ export async function getSteamPlayerName(steamId: string): Promise<string | null
  * Requires that the user's game list is public.
  */
 export async function getSteamOwnedGames(steamId: string): Promise<SteamGame[]> {
-  const url = `${BASE}/IPlayerService/GetOwnedGames/v1/?key=${STEAM_API_KEY}&steamid=${steamId}&include_appinfo=1&include_played_free_games=1&format=json`;
-  const res = await fetch(url);
-  const json = await res.json();
+  const json = await apiFetch<any>(`/steam/games?steamId=${encodeURIComponent(steamId)}`);
   const games = json.response?.games;
   if (!games) return [];
   return games.map((g: any) => ({

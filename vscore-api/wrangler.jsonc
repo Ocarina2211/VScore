@@ -19,7 +19,8 @@
 	],
 	"secrets": {
 		"required": [
-			"RAWG_API_KEY",
+			"IGDB_CLIENT_ID",
+			"IGDB_CLIENT_SECRET",
 			"STEAM_API_KEY",
 			"DEEPL_API_KEY"
 		]
