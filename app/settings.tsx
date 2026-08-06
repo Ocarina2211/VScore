@@ -1,15 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Modal, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { LanguagePref, useLanguage, useResolvedLanguage, useTranslation } from '../contexts/I18nContext';
 import { ThemeMode, useTheme } from '../contexts/ThemeContext';
 import { AuthProvider, deleteAccount, getAuthEmail, getAuthProvider, signOut } from '../services/auth';
+import { isPseudoTaken } from '../services/community';
 import { auth, db } from '../services/firebase';
-import { cancelAllScheduledNotificationsAsync, getNotificationPermissionsAsync, registerPushTokenAsync, requestNotificationPermissionsAsync, scheduleNotificationAsync, unregisterPushTokenAsync } from '../services/notifications';
+import { cancelAllScheduledNotificationsAsync, getNotificationPermissionsAsync, registerPushTokenAsync, requestNotificationPermissionsAsync, rescheduleInactivityReminderAsync, unregisterPushTokenAsync } from '../services/notifications';
 import { getSteamPlayerName, parseSteamInput } from '../services/steam';
-import { loadData, removeData, saveData, USER_KEYS } from '../services/storage';
+import { clearLocalUserData, loadData, removeData, saveData, USER_KEYS } from '../services/storage';
 
 export default function SettingsScreen() {
   const { themeMode, setThemeMode, colors } = useTheme();
@@ -48,6 +49,10 @@ export default function SettingsScreen() {
     setAuthEmail(getAuthEmail());
   }, []);
 
+  const scheduleReminder = useCallback(async () => {
+    await rescheduleInactivityReminderAsync('🎮 V-Score', t.settingsNotifBody);
+  }, [t.settingsNotifBody]);
+
   // Refresh auth state when screen focuses
   useFocusEffect(useCallback(() => {
     setAuthProvider(getAuthProvider());
@@ -71,7 +76,8 @@ export default function SettingsScreen() {
     });
   }, []);
 
-  // Check & auto-enable notifications on first mount
+  // Read the current permission without prompting. The permission request is
+  // intentionally triggered only after the user enables the switch.
   useFocusEffect(
     useCallback(() => {
       Promise.all([
@@ -83,35 +89,11 @@ export default function SettingsScreen() {
           setNotificationsEnabled(enabled);
           if (enabled) await registerPushTokenAsync(resolvedLanguage);
         } else {
-          // Request on first open
-          const { status: newStatus } = await requestNotificationPermissionsAsync();
-          if (newStatus === 'granted') {
-            setNotificationsEnabled(true);
-            await saveData(USER_KEYS.notificationsEnabled, true);
-            await registerPushTokenAsync(resolvedLanguage);
-            await scheduleReminder();
-          } else {
-            setNotificationsEnabled(false);
-          }
+          setNotificationsEnabled(false);
         }
       });
     }, [resolvedLanguage])
   );
-
-  const scheduleReminder = async () => {
-    await cancelAllScheduledNotificationsAsync();
-    await scheduleNotificationAsync({
-      content: {
-        title: '🎮 V-Score',
-        body: t.settingsNotifBody,
-      },
-      trigger: {
-        type: 'timeInterval',
-        seconds: 3 * 24 * 60 * 60,
-        repeats: true,
-      },
-    });
-  };
 
   const handleToggleNotifications = async () => {
     if (notificationsEnabled) {
@@ -138,9 +120,15 @@ export default function SettingsScreen() {
   const handleSavePseudo = async () => {
     const trimmed = pseudo.trim();
     if (!trimmed || trimmed === savedPseudo) return;
+    if (trimmed.length < 2 || trimmed.length > 20) {
+      Alert.alert('', t.onboardingError);
+      return;
+    }
 
     // 30-day cooldown check
-    const lastChanged = await loadData(USER_KEYS.pseudoLastChanged);
+    const profile = (await loadData(USER_KEYS.profile)) ?? {};
+    const storedLastChanged = await loadData(USER_KEYS.pseudoLastChanged);
+    const lastChanged = Math.max(Number(storedLastChanged ?? 0), Number(profile.lastPseudoChange ?? 0)) || null;
     if (lastChanged) {
       const daysSince = (Date.now() - Number(lastChanged)) / (1000 * 60 * 60 * 24);
       if (daysSince < 30) {
@@ -151,17 +139,35 @@ export default function SettingsScreen() {
     }
 
     setSavingPseudo(true);
-    const profile = (await loadData(USER_KEYS.profile)) ?? {};
-    await saveData(USER_KEYS.profile, { ...profile, pseudo: trimmed });
-    await saveData(USER_KEYS.pseudoLastChanged, Date.now());
-    const uid = auth.currentUser?.uid;
-    if (uid) {
-      try { await setDoc(doc(db, 'users', uid), { pseudo: trimmed }, { merge: true }); } catch (_) {}
+    try {
+      const user = auth.currentUser;
+      if (await isPseudoTaken(trimmed, user?.uid ?? '')) {
+        Alert.alert('', t.profilePseudoTaken);
+        return;
+      }
+      const changedAt = Date.now();
+      await saveData(USER_KEYS.profile, { ...profile, pseudo: trimmed, lastPseudoChange: changedAt, _updatedAt: changedAt });
+      await saveData(USER_KEYS.pseudoLastChanged, changedAt);
+      const uid = user?.uid;
+      if (uid && !user?.isAnonymous) {
+        try {
+          await setDoc(doc(db, 'users', uid), {
+            pseudo: trimmed,
+            pseudoLower: trimmed.toLowerCase(),
+            updatedAt: serverTimestamp(),
+          }, { merge: true });
+        } catch (error) {
+          console.warn('[Settings] Profile cloud sync failed:', error instanceof Error ? error.message : error);
+        }
+      }
+      setSavedPseudo(trimmed);
+      // First time message explains the 30-day rule
+      Alert.alert('', lastChanged ? t.settingsUsernameUpdated : `${t.settingsUsernameUpdated}\n\n${t.profileChangeUsernameOnce}`);
+    } catch {
+      Alert.alert(t.commonErrorTitle, t.commonActionError);
+    } finally {
+      setSavingPseudo(false);
     }
-    setSavedPseudo(trimmed);
-    setSavingPseudo(false);
-    // First time message explains the 30-day rule
-    Alert.alert('', lastChanged ? t.settingsUsernameUpdated : `${t.settingsUsernameUpdated}\n\n${t.profileChangeUsernameOnce}`);
   };
 
   const pseudoDirty = pseudo.trim() !== savedPseudo && pseudo.trim().length > 0;
@@ -169,17 +175,14 @@ export default function SettingsScreen() {
   const handleSteamConnect = async () => {
     if (!steamInput.trim()) return;
     setSteamLoading(true);
-    console.log('[Settings] Steam connect pressed, input:', steamInput);
     try {
       const resolvedId = await parseSteamInput(steamInput);
-      console.log('[Settings] resolvedId:', resolvedId);
       if (!resolvedId) {
         Alert.alert('', t.settingsSteamError);
         setSteamLoading(false);
         return;
       }
       const name = await getSteamPlayerName(resolvedId);
-      console.log('[Settings] Steam name:', name);
       if (!name) {
         Alert.alert('', t.settingsSteamError);
         setSteamLoading(false);
@@ -199,8 +202,8 @@ export default function SettingsScreen() {
   };
 
   const handleSteamUnlink = () => {
-    Alert.alert('', 'Unlink Steam?', [
-      { text: 'Cancel', style: 'cancel' },
+    Alert.alert('', `${t.settingsSteamUnlink}?`, [
+      { text: t.commonCancel, style: 'cancel' },
       {
         text: t.settingsSteamUnlink,
         style: 'destructive',
@@ -259,28 +262,15 @@ export default function SettingsScreen() {
                 style={styles.signOutBtn}
                 onPress={() =>
                   Alert.alert(t.settingsSignOutConfirm, t.settingsSignOutMessage, [
-                    { text: 'Annuler', style: 'cancel' },
+                    { text: t.commonCancel, style: 'cancel' },
                     {
                       text: t.settingsSignOut,
                       style: 'destructive',
                       onPress: async () => {
+                        await unregisterPushTokenAsync();
                         await signOut();
                         // Clear all user-specific local data so next login starts fresh
-                        await Promise.all([
-                          removeData(USER_KEYS.profile),
-                          removeData(USER_KEYS.ratings),
-                          removeData(USER_KEYS.top3),
-                          removeData(USER_KEYS.xp),
-                          removeData(USER_KEYS.lists),
-                          removeData(USER_KEYS.lastRatingDate),
-                          removeData(USER_KEYS.pseudoLastChanged),
-                          removeData(USER_KEYS.lastSeenRequestIds),
-                          removeData(USER_KEYS.lastSeenFriendUids),
-                          removeData(USER_KEYS.lastSeenSentUids),
-                          removeData(USER_KEYS.lastSeenFriendActivityAt),
-                          removeData(USER_KEYS.lastAppOpenAt),
-                          removeData(USER_KEYS.steamId),
-                        ]);
+                        await clearLocalUserData();
                         router.replace('/login');
                       },
                     },
@@ -293,28 +283,14 @@ export default function SettingsScreen() {
                 style={styles.deleteAccountBtn}
                 onPress={() =>
                   Alert.alert(t.settingsDeleteAccountConfirm, t.settingsDeleteAccountMessage, [
-                    { text: 'Annuler', style: 'cancel' },
+                    { text: t.commonCancel, style: 'cancel' },
                     {
                       text: t.settingsDeleteAccount,
                       style: 'destructive',
                       onPress: async () => {
                         try {
                           await deleteAccount();
-                          await Promise.all([
-                            removeData(USER_KEYS.profile),
-                            removeData(USER_KEYS.ratings),
-                            removeData(USER_KEYS.top3),
-                            removeData(USER_KEYS.xp),
-                            removeData(USER_KEYS.lists),
-                            removeData(USER_KEYS.lastRatingDate),
-                            removeData(USER_KEYS.pseudoLastChanged),
-                            removeData(USER_KEYS.lastSeenRequestIds),
-                            removeData(USER_KEYS.lastSeenFriendUids),
-                            removeData(USER_KEYS.lastSeenSentUids),
-                            removeData(USER_KEYS.lastSeenFriendActivityAt),
-                            removeData(USER_KEYS.lastAppOpenAt),
-                            removeData(USER_KEYS.steamId),
-                          ]);
+                          await clearLocalUserData();
                           router.replace('/login');
                         } catch (e: any) {
                           console.error('[DeleteAccount] code:', e?.code, 'msg:', e?.message);
@@ -369,7 +345,7 @@ export default function SettingsScreen() {
               onChangeText={setPseudo}
               placeholder={t.settingsUsernamePlaceholder}
               placeholderTextColor={colors.textSecondary}
-              maxLength={24}
+              maxLength={20}
               autoCorrect={false}
               autoCapitalize="none"
             />
@@ -486,7 +462,7 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.infoRow, { borderTopWidth: 1, borderTopColor: colors.background }]}>
             <Text style={styles.infoLabel}>Game data</Text>
-            <Text style={[styles.infoValue, { color: colors.primary }]}>Game data provided by IGDB.com</Text>
+            <Text style={[styles.infoValue, { color: colors.primary }]}>{t.settingsDataProvider}</Text>
           </View>
         </View>
       </View>

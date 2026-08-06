@@ -50,7 +50,7 @@ export default function LoginScreen() {
   useEffect(() => {
     if (Platform.OS === 'ios') {
       AppleAuthentication.isAvailableAsync()
-        .then((v) => { console.log('[Apple] isAvailableAsync:', v); setAppleAvailable(v); })
+        .then(setAppleAvailable)
         .catch((err) => { console.error('[Apple] isAvailableAsync error:', err); });
     }
   }, []);
@@ -213,7 +213,7 @@ export default function LoginScreen() {
             profile = snap.data();
             await saveData(USER_KEYS.profile, profile);
           }
-        } catch (_) {}
+        } catch {}
       }
     }
     router.replace(profile?.pseudo ? '/(tabs)' : '/onboarding');

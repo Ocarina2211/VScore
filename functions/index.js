@@ -1,7 +1,7 @@
-const crypto = require('crypto');
 const { initializeApp } = require('firebase-admin/app');
-const { FieldValue, getFirestore } = require('firebase-admin/firestore');
-const { defineSecret } = require('firebase-functions/params');
+const { getAuth } = require('firebase-admin/auth');
+const { FieldValue, getFirestore, Timestamp } = require('firebase-admin/firestore');
+const { getStorage } = require('firebase-admin/storage');
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
 
@@ -9,135 +9,6 @@ initializeApp();
 const db = getFirestore();
 const REGION = 'europe-west1';
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
-const RAWG_BASE_URL = 'https://api.rawg.io/api';
-const RAWG_API_KEY = defineSecret('RAWG_API_KEY');
-const RAWG_LIST_TTL_MS = 6 * 60 * 60 * 1000;
-const RAWG_DETAIL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const RAWG_FETCH_TIMEOUT_MS = 12_000;
-const MAX_CACHE_BYTES = 650_000;
-const ALLOWED_RAWG_PARAMS = new Set([
-  'dates',
-  'genres',
-  'lang',
-  'metacritic',
-  'ordering',
-  'page',
-  'page_size',
-  'platforms',
-  'search',
-  'tags',
-]);
-
-function normalizeRawgRequest(data) {
-  const path = typeof data?.path === 'string' ? data.path : '';
-  if (!/^\/games(?:\/\d+)?(?:\/(?:screenshots|stores|suggested))?$/.test(path)) {
-    throw new HttpsError('invalid-argument', 'Unsupported RAWG path.');
-  }
-
-  const rawQuery = data?.query && typeof data.query === 'object' ? data.query : {};
-  const query = {};
-  for (const [key, rawValue] of Object.entries(rawQuery)) {
-    if (!ALLOWED_RAWG_PARAMS.has(key) || rawValue == null || rawValue === '') continue;
-    const value = String(rawValue);
-    if (value.length > 200) throw new HttpsError('invalid-argument', `RAWG parameter too long: ${key}`);
-    query[key] = value;
-  }
-
-  const page = Number(query.page ?? 1);
-  const pageSize = Number(query.page_size ?? 20);
-  if (!Number.isInteger(page) || page < 1 || page > 1000) {
-    throw new HttpsError('invalid-argument', 'Invalid RAWG page.');
-  }
-  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 60) {
-    throw new HttpsError('invalid-argument', 'Invalid RAWG page size.');
-  }
-  query.page = String(page);
-  query.page_size = String(pageSize);
-
-  const canonicalQuery = Object.entries(query)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-    .join('&');
-
-  return { path, query, canonicalQuery };
-}
-
-function rawgCacheTtl(path) {
-  return /^\/games\/\d+/.test(path) ? RAWG_DETAIL_TTL_MS : RAWG_LIST_TTL_MS;
-}
-
-async function fetchRawg(path, query) {
-  const url = new URL(`${RAWG_BASE_URL}${path}`);
-  Object.entries(query).forEach(([key, value]) => url.searchParams.set(key, value));
-  url.searchParams.set('key', RAWG_API_KEY.value());
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RAWG_FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      headers: { Accept: 'application/json', 'User-Agent': 'VScore/1.0' },
-      signal: controller.signal,
-    });
-    const body = await response.text();
-    if (!response.ok) throw new Error(`RAWG HTTP ${response.status}`);
-    try {
-      return JSON.parse(body);
-    } catch {
-      throw new Error('RAWG returned non-JSON data');
-    }
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-exports.rawgProxy = onCall(
-  {
-    region: REGION,
-    secrets: [RAWG_API_KEY],
-    timeoutSeconds: 30,
-    memory: '256MiB',
-    maxInstances: 10,
-  },
-  async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Authentication required.');
-
-    const { path, query, canonicalQuery } = normalizeRawgRequest(request.data);
-    const cacheId = crypto.createHash('sha256').update(`${path}?${canonicalQuery}`).digest('hex');
-    const cacheRef = db.collection('rawg_cache').doc(cacheId);
-    const cacheSnap = await cacheRef.get();
-    const cached = cacheSnap.exists ? cacheSnap.data() : null;
-    const cachedAt = Number(cached?.fetchedAtMs ?? 0);
-    const isFresh = cached?.data != null && Date.now() - cachedAt < rawgCacheTtl(path);
-
-    if (isFresh) return { data: cached.data, cache: 'hit', fetchedAt: cachedAt };
-
-    try {
-      const data = await fetchRawg(path, query);
-      const serializedBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
-      if (serializedBytes <= MAX_CACHE_BYTES) {
-        const now = Date.now();
-        await cacheRef.set({
-          path,
-          query,
-          data,
-          fetchedAt: FieldValue.serverTimestamp(),
-          fetchedAtMs: now,
-          expiresAtMs: now + rawgCacheTtl(path),
-          sizeBytes: serializedBytes,
-        });
-        return { data, cache: 'refresh', fetchedAt: now };
-      }
-      return { data, cache: 'too-large', fetchedAt: Date.now() };
-    } catch (error) {
-      if (cached?.data != null) {
-        console.warn(`RAWG unavailable; serving stale cache for ${path}:`, error?.message ?? error);
-        return { data: cached.data, cache: 'stale', fetchedAt: cachedAt };
-      }
-      console.error(`RAWG unavailable and cache empty for ${path}:`, error?.message ?? error);
-      throw new HttpsError('unavailable', 'RAWG is unavailable and no cached response exists.');
-    }
-  }
-);
 
 function isExpoPushToken(value) {
   return typeof value === 'string' && /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(value);
@@ -145,13 +16,45 @@ function isExpoPushToken(value) {
 
 async function claimEvent(eventId) {
   if (!eventId) return true;
-  try {
-    await db.collection('notification_events').doc(eventId).create({ createdAt: FieldValue.serverTimestamp() });
+  const eventRef = db.collection('notification_events').doc(eventId);
+  const now = Date.now();
+  return db.runTransaction(async (tx) => {
+    const snapshot = await tx.get(eventRef);
+    if (snapshot.exists) {
+      const data = snapshot.data();
+      // Documents from the previous implementation are completed claims.
+      if (!data.status || data.status === 'completed') {
+        if (!data.expiresAt) {
+          tx.set(eventRef, {
+            expiresAt: Timestamp.fromMillis(now + 30 * 24 * 60 * 60 * 1000),
+          }, { merge: true });
+        }
+        return false;
+      }
+      if ((data.leaseUntil?.toMillis?.() ?? 0) > now) return false;
+    }
+    tx.set(eventRef, {
+      status: 'processing',
+      createdAt: snapshot.exists ? (snapshot.data().createdAt ?? FieldValue.serverTimestamp()) : FieldValue.serverTimestamp(),
+      leaseUntil: Timestamp.fromMillis(now + 5 * 60 * 1000),
+      expiresAt: Timestamp.fromMillis(now + 30 * 24 * 60 * 60 * 1000),
+    }, { merge: true });
     return true;
-  } catch (error) {
-    if (error?.code === 6 || error?.code === 'already-exists') return false;
-    throw error;
-  }
+  });
+}
+
+async function completeEvent(eventId) {
+  if (!eventId) return;
+  await db.collection('notification_events').doc(eventId).set({
+    status: 'completed',
+    completedAt: FieldValue.serverTimestamp(),
+    leaseUntil: FieldValue.delete(),
+  }, { merge: true });
+}
+
+async function releaseEvent(eventId) {
+  if (!eventId) return;
+  await db.collection('notification_events').doc(eventId).delete();
 }
 
 async function sendPushToUser(uid, content) {
@@ -182,14 +85,24 @@ async function sendPushToUser(uid, content) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(messages),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`Expo push request failed: ${response.status}`);
 
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    // A 2xx response means Expo accepted the batch. Retrying merely because its
+    // response body was unreadable would send every notification twice.
+    return;
+  }
   const tickets = Array.isArray(result.data) ? result.data : [result.data];
   const invalidTokens = tokens.filter((_, index) => tickets[index]?.details?.error === 'DeviceNotRegistered');
   if (invalidTokens.length > 0) {
-    await userRef.update({ expoPushTokens: FieldValue.arrayRemove(...invalidTokens) });
+    await userRef.update({ expoPushTokens: FieldValue.arrayRemove(...invalidTokens) }).catch((error) => {
+      console.warn('Unable to remove invalid Expo push tokens', error instanceof Error ? error.message : error);
+    });
   }
 }
 
@@ -204,16 +117,130 @@ async function localizedContent(uid, french, english) {
   return snap.exists && snap.data().notificationLanguage === 'en' ? english : french;
 }
 
+async function deleteRatingAndAggregate(uid, gameId) {
+  const ratingRef = db.collection('ratings').doc(uid).collection('games').doc(gameId);
+  const statsRef = db.collection('game_stats').doc(gameId);
+  await db.runTransaction(async (tx) => {
+    const [ratingSnap, statsSnap] = await Promise.all([
+      tx.get(ratingRef),
+      tx.get(statsRef),
+    ]);
+    if (!ratingSnap.exists) return;
+
+    const rating = ratingSnap.data();
+    tx.delete(ratingRef);
+    if (!statsSnap.exists) return;
+
+    const stats = statsSnap.data();
+    const count = Math.max(0, (stats.count ?? 0) - 1);
+    if (count === 0) {
+      tx.delete(statsRef);
+      return;
+    }
+    const subtract = (total, value) => Math.max(0, (total ?? 0) - (value ?? 0));
+    const ratingAverage = Number.isFinite(rating.avg)
+      ? rating.avg
+      : ((rating.general ?? 0) + (rating.graphics ?? 0) + (rating.gameplay ?? 0) + (rating.lifespan ?? 0)) / 4;
+    const totalScore = subtract(stats.totalScore, ratingAverage);
+    const totalGeneral = subtract(stats.totalGeneral, rating.general);
+    const totalGraphics = subtract(stats.totalGraphics, rating.graphics);
+    const totalGameplay = subtract(stats.totalGameplay, rating.gameplay);
+    const totalStory = subtract(stats.totalStory, rating.story);
+    const totalLifespan = subtract(stats.totalLifespan, rating.lifespan);
+    const totalCompleted = Math.max(0, (stats.totalCompleted ?? 0) - (rating.completed ? 1 : 0));
+    tx.update(statsRef, {
+      count,
+      totalScore,
+      avgScore: totalScore / count,
+      totalGeneral,
+      avgGeneral: totalGeneral / count,
+      totalGraphics,
+      avgGraphics: totalGraphics / count,
+      totalGameplay,
+      avgGameplay: totalGameplay / count,
+      totalStory,
+      avgStory: totalStory / count,
+      totalLifespan,
+      avgLifespan: totalLifespan / count,
+      totalCompleted,
+      completedPercent: (totalCompleted / count) * 100,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+async function deleteDocumentsInBatches(documents) {
+  for (let index = 0; index < documents.length; index += 400) {
+    const batch = db.batch();
+    documents.slice(index, index + 400).forEach((document) => batch.delete(document.ref));
+    await batch.commit();
+  }
+}
+
+exports.deleteMyAccount = onCall(
+  { region: REGION, timeoutSeconds: 300 },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError('unauthenticated', 'Authentication required.');
+
+    try {
+      // Remove each rating together with its contribution to game_stats.
+      // Re-query to cover a rating write that was finishing as deletion began.
+      for (let pass = 0; pass < 3; pass += 1) {
+        const ratings = await db.collection('ratings').doc(uid).collection('games').get();
+        if (ratings.empty) break;
+        for (const rating of ratings.docs) await deleteRatingAndAggregate(uid, rating.id);
+      }
+      const remainingRating = await db.collection('ratings').doc(uid).collection('games').limit(1).get();
+      if (!remainingRating.empty) throw new Error('Ratings were still being written during account deletion.');
+
+      for (let pass = 0; pass < 2; pass += 1) {
+        const [sentRequests, receivedRequests] = await Promise.all([
+          db.collection('friend_requests').where('fromUid', '==', uid).get(),
+          db.collection('friend_requests').where('toUid', '==', uid).get(),
+        ]);
+        const relations = new Map(
+          [...sentRequests.docs, ...receivedRequests.docs].map((document) => [document.id, document])
+        );
+        if (relations.size === 0) break;
+        await deleteDocumentsInBatches([...relations.values()]);
+      }
+      const [remainingSentRelation, remainingReceivedRelation] = await Promise.all([
+        db.collection('friend_requests').where('fromUid', '==', uid).limit(1).get(),
+        db.collection('friend_requests').where('toUid', '==', uid).limit(1).get(),
+      ]);
+      if (!remainingSentRelation.empty || !remainingReceivedRelation.empty) {
+        throw new Error('Friend relations were still being written during account deletion.');
+      }
+      await db.collection('users').doc(uid).delete();
+
+      await getStorage().bucket().file(`avatars/${uid}.jpg`).delete({ ignoreNotFound: true });
+
+      await getAuth().deleteUser(uid);
+      return { deleted: true };
+    } catch (error) {
+      console.error('Account deletion failed', error instanceof Error ? error.message : error);
+      throw new HttpsError('internal', 'Account deletion failed. Please try again.');
+    }
+  }
+);
+
 exports.onFriendRequestCreated = onDocumentCreated(
   { document: 'friend_requests/{requestId}', region: REGION },
   async (event) => {
     const request = event.data?.data();
     if (!request || request.status !== 'pending' || !(await claimEvent(event.id))) return;
-    const pseudo = await getPseudo(request.fromUid, 'Quelqu’un');
-    const content = await localizedContent(request.toUid,
-      { title: '👥 Demande d’ami', body: `${pseudo} vous a envoyé une demande d’ami.` },
-      { title: '👥 Friend request', body: `${pseudo} sent you a friend request.` });
-    await sendPushToUser(request.toUid, { ...content, data: { route: '/friends' } });
+    try {
+      const pseudo = await getPseudo(request.fromUid, 'Quelqu’un');
+      const content = await localizedContent(request.toUid,
+        { title: '👥 Demande d’ami', body: `${pseudo} vous a envoyé une demande d’ami.` },
+        { title: '👥 Friend request', body: `${pseudo} sent you a friend request.` });
+      await sendPushToUser(request.toUid, { ...content, data: { route: '/friends' } });
+      await completeEvent(event.id);
+    } catch (error) {
+      await releaseEvent(event.id);
+      throw error;
+    }
   }
 );
 
@@ -224,17 +251,22 @@ exports.onFriendRequestUpdated = onDocumentUpdated(
     const after = event.data?.after.data();
     if (!after || before?.status === after.status || !['accepted', 'rejected'].includes(after.status)) return;
     if (!(await claimEvent(event.id))) return;
-
-    const pseudo = await getPseudo(after.toUid, 'Quelqu’un');
-    const accepted = after.status === 'accepted';
-    const content = accepted
-      ? await localizedContent(after.fromUid,
-          { title: '🎉 Demande acceptée !', body: `${pseudo} a accepté votre demande d’ami.` },
-          { title: '🎉 Request accepted!', body: `${pseudo} accepted your friend request.` })
-      : await localizedContent(after.fromUid,
-          { title: 'Demande refusée', body: `${pseudo} a refusé votre demande d’ami.` },
-          { title: 'Request declined', body: `${pseudo} declined your friend request.` });
-    await sendPushToUser(after.fromUid, { ...content, data: { route: '/friends' } });
+    try {
+      const pseudo = await getPseudo(after.toUid, 'Quelqu’un');
+      const accepted = after.status === 'accepted';
+      const content = accepted
+        ? await localizedContent(after.fromUid,
+            { title: '🎉 Demande acceptée !', body: `${pseudo} a accepté votre demande d’ami.` },
+            { title: '🎉 Request accepted!', body: `${pseudo} accepted your friend request.` })
+        : await localizedContent(after.fromUid,
+            { title: 'Demande refusée', body: `${pseudo} a refusé votre demande d’ami.` },
+            { title: 'Request declined', body: `${pseudo} declined your friend request.` });
+      await sendPushToUser(after.fromUid, { ...content, data: { route: '/friends' } });
+      await completeEvent(event.id);
+    } catch (error) {
+      await releaseEvent(event.id);
+      throw error;
+    }
   }
 );
 
@@ -244,26 +276,39 @@ exports.onRatingCreated = onDocumentCreated(
     const rating = event.data?.data();
     const userId = event.params.userId;
     if (!rating || !(await claimEvent(event.id))) return;
+    try {
+      const [sent, received, pseudo] = await Promise.all([
+        db.collection('friend_requests').where('fromUid', '==', userId).where('status', '==', 'accepted').get(),
+        db.collection('friend_requests').where('toUid', '==', userId).where('status', '==', 'accepted').get(),
+        getPseudo(userId, 'Un ami'),
+      ]);
+      const friendUids = new Set([
+        ...sent.docs.map((doc) => doc.data().toUid),
+        ...received.docs.map((doc) => doc.data().fromUid),
+      ]);
+      const gameName = rating.name || rating.gameName || 'un jeu';
 
-    const [sent, received, pseudo] = await Promise.all([
-      db.collection('friend_requests').where('fromUid', '==', userId).where('status', '==', 'accepted').get(),
-      db.collection('friend_requests').where('toUid', '==', userId).where('status', '==', 'accepted').get(),
-      getPseudo(userId, 'Un ami'),
-    ]);
-    const friendUids = new Set([
-      ...sent.docs.map((doc) => doc.data().toUid),
-      ...received.docs.map((doc) => doc.data().fromUid),
-    ]);
-    const gameName = rating.name || rating.gameName || 'un jeu';
-
-    await Promise.all([...friendUids].map(async (friendUid) => {
-      const content = await localizedContent(friendUid,
-        { title: '🎮 Activité de tes amis', body: `${pseudo} vient de noter « ${gameName} ».` },
-        { title: '🎮 Friend activity', body: `${pseudo} just rated “${gameName}”.` });
-      await sendPushToUser(friendUid, {
-        ...content,
-        data: { route: `/game/${event.params.gameId}` },
-      });
-    }));
+      await Promise.all([...friendUids].map(async (friendUid) => {
+        const deliveryEventId = `${event.id}_${friendUid}`;
+        if (!(await claimEvent(deliveryEventId))) return;
+        try {
+          const content = await localizedContent(friendUid,
+            { title: '🎮 Activité de tes amis', body: `${pseudo} vient de noter « ${gameName} ».` },
+            { title: '🎮 Friend activity', body: `${pseudo} just rated “${gameName}”.` });
+          await sendPushToUser(friendUid, {
+            ...content,
+            data: { route: `/game/${event.params.gameId}` },
+          });
+          await completeEvent(deliveryEventId);
+        } catch (error) {
+          await releaseEvent(deliveryEventId);
+          throw error;
+        }
+      }));
+      await completeEvent(event.id);
+    } catch (error) {
+      await releaseEvent(event.id);
+      throw error;
+    }
   }
 );

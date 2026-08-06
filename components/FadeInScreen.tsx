@@ -13,7 +13,7 @@ export default function FadeInScreen({ children, style }: { children: React.Reac
       tension: 65,
       friction: 11,
     }).start();
-  }, []);
+  }, [translateY]);
 
   return (
     <Animated.View style={[{ flex: 1, transform: [{ translateY }] }, style]}>

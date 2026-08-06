@@ -16,6 +16,10 @@ const IGDB_LIST_CACHE_SECONDS = 6 * 60 * 60;
 const IGDB_DETAIL_CACHE_SECONDS = 7 * 24 * 60 * 60;
 const IGDB_GAME_ID_OFFSET = 1_000_000_000;
 const IGDB_REQUESTS_PER_SECOND = 4;
+const IGDB_MAX_CONCURRENT_REQUESTS = 8;
+const IGDB_RATE_RETRIES = 2;
+const PROVIDER_TIMEOUT_MS = 12_000;
+const MAX_TRANSLATE_BODY_BYTES = 4_096;
 // A perfect score based on one or two outlets is too misleading to surface.
 const MIN_EXTERNAL_CRITIC_RATINGS = 5;
 const IGDB_CACHE_SCHEMA = "7";
@@ -25,10 +29,12 @@ const AUTH_RATE_LIMIT = 120;
 const AUTH_RATE_WINDOW_MS = 60_000;
 
 let firebaseCertificates: { expiresAt: number; values: Record<string, string> } | undefined;
-let igdbToken: { accessToken: string; expiresAt: number } | undefined;
-let igdbTokenRequest: Promise<string> | undefined;
+let igdbToken: { accessToken: string; expiresAt: number; credentialKey: string } | undefined;
+let igdbTokenRequest: { credentialKey: string; promise: Promise<string> } | undefined;
 let igdbRateQueue: Promise<void> = Promise.resolve();
 let igdbRequestStarts: number[] = [];
+let activeIgdbRequests = 0;
+const igdbConcurrencyWaiters: Array<() => void> = [];
 const requestCounters = new Map<string, { count: number; resetsAt: number }>();
 
 const CORS_HEADERS = {
@@ -77,6 +83,19 @@ function requireSecret(value: string | undefined, name: string): string {
 	return value;
 }
 
+async function fetchProvider(url: string | URL, init: RequestInit, provider: string): Promise<Response> {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+	try {
+		return await fetch(url, { ...init, redirect: "error", signal: controller.signal });
+	} catch (error) {
+		if (controller.signal.aborted) throw new ApiError(504, `${provider} timed out.`);
+		throw new ApiError(502, `${provider} is unreachable.`);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
 function bearerToken(request: Request): string {
 	const authorization = request.headers.get("authorization") ?? "";
 	const match = authorization.match(/^Bearer\s+(\S+)$/i);
@@ -87,7 +106,11 @@ function bearerToken(request: Request): string {
 async function getFirebaseCertificates(): Promise<Record<string, string>> {
 	if (firebaseCertificates && firebaseCertificates.expiresAt > Date.now()) return firebaseCertificates.values;
 
-	const response = await fetch(FIREBASE_CERTIFICATES_URL, { headers: { Accept: "application/json" } });
+	const response = await fetchProvider(
+		FIREBASE_CERTIFICATES_URL,
+		{ headers: { Accept: "application/json" } },
+		"Firebase authentication",
+	);
 	if (!response.ok) throw new ApiError(503, "Authentication service unavailable.");
 	const values = (await response.json()) as Record<string, string>;
 	const maxAge = Number(response.headers.get("cache-control")?.match(/max-age=(\d+)/)?.[1] ?? 3600);
@@ -125,6 +148,11 @@ async function authenticateFirebase(request: Request, env: WorkerEnv): Promise<s
 
 function enforceUserRateLimit(uid: string): void {
 	const now = Date.now();
+	if (requestCounters.size > 10_000) {
+		for (const [key, counter] of requestCounters) {
+			if (counter.resetsAt <= now) requestCounters.delete(key);
+		}
+	}
 	const current = requestCounters.get(uid);
 	if (!current || current.resetsAt <= now) {
 		requestCounters.set(uid, { count: 1, resetsAt: now + AUTH_RATE_WINDOW_MS });
@@ -337,16 +365,41 @@ async function reserveIgdbRequestSlot(): Promise<void> {
 	await reservation;
 }
 
-async function requestIgdbToken(env: WorkerEnv): Promise<string> {
-	if (igdbToken && igdbToken.expiresAt > Date.now() + 60_000) return igdbToken.accessToken;
-	if (igdbTokenRequest) return igdbTokenRequest;
+async function acquireIgdbConnection(): Promise<() => void> {
+	if (activeIgdbRequests < IGDB_MAX_CONCURRENT_REQUESTS) {
+		activeIgdbRequests += 1;
+	} else {
+		await new Promise<void>((resolve) => igdbConcurrencyWaiters.push(resolve));
+	}
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const next = igdbConcurrencyWaiters.shift();
+		if (next) next();
+		else activeIgdbRequests = Math.max(0, activeIgdbRequests - 1);
+	};
+}
 
-	igdbTokenRequest = (async () => {
+async function requestIgdbToken(env: WorkerEnv): Promise<string> {
+	const clientId = requireSecret(env.IGDB_CLIENT_ID, "IGDB_CLIENT_ID");
+	const clientSecret = requireSecret(env.IGDB_CLIENT_SECRET, "IGDB_CLIENT_SECRET");
+	const credentialKey = `${clientId}\0${clientSecret}`;
+	if (igdbToken?.credentialKey === credentialKey && igdbToken.expiresAt > Date.now() + 60_000) {
+		return igdbToken.accessToken;
+	}
+	if (igdbTokenRequest?.credentialKey === credentialKey) return igdbTokenRequest.promise;
+
+	const promise = (async () => {
 		const url = new URL(TWITCH_TOKEN_URL);
-		url.searchParams.set("client_id", requireSecret(env.IGDB_CLIENT_ID, "IGDB_CLIENT_ID"));
-		url.searchParams.set("client_secret", requireSecret(env.IGDB_CLIENT_SECRET, "IGDB_CLIENT_SECRET"));
+		url.searchParams.set("client_id", clientId);
+		url.searchParams.set("client_secret", clientSecret);
 		url.searchParams.set("grant_type", "client_credentials");
-		const response = await fetch(url, { method: "POST", headers: { Accept: "application/json" } });
+		const response = await fetchProvider(
+			url,
+			{ method: "POST", headers: { Accept: "application/json" } },
+			"Twitch authentication",
+		);
 		const payload = (await readJsonResponse(response, "Twitch authentication")) as {
 			access_token?: string;
 			expires_in?: number;
@@ -357,33 +410,67 @@ async function requestIgdbToken(env: WorkerEnv): Promise<string> {
 		igdbToken = {
 			accessToken: payload.access_token,
 			expiresAt: Date.now() + Math.max(60, payload.expires_in ?? 0) * 1000,
+			credentialKey,
 		};
 		return payload.access_token;
 	})().finally(() => {
-		igdbTokenRequest = undefined;
+		if (igdbTokenRequest?.credentialKey === credentialKey) igdbTokenRequest = undefined;
 	});
+	igdbTokenRequest = { credentialKey, promise };
 
-	return igdbTokenRequest;
+	return promise;
 }
 
-async function igdbQuery(env: WorkerEnv, endpoint: string, body: string, retryAuth = true): Promise<unknown> {
-	await reserveIgdbRequestSlot();
-	const response = await fetch(`${IGDB_BASE_URL}/${endpoint}`, {
-		method: "POST",
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${await requestIgdbToken(env)}`,
-			"Client-ID": requireSecret(env.IGDB_CLIENT_ID, "IGDB_CLIENT_ID"),
-			"Content-Type": "text/plain",
-		},
-		body,
-	});
-	if (response.status === 401 && retryAuth) {
-		igdbToken = undefined;
-		return igdbQuery(env, endpoint, body, false);
+async function igdbQuery(
+	env: WorkerEnv,
+	endpoint: string,
+	body: string,
+	authRetries = 1,
+	rateRetries = IGDB_RATE_RETRIES,
+): Promise<unknown> {
+	let remainingAuthRetries = authRetries;
+	let remainingRateRetries = rateRetries;
+
+	while (true) {
+		const release = await acquireIgdbConnection();
+		let retryDelayMs: number | null = null;
+		try {
+			// Reserve immediately before the actual provider request. Reserving before
+			// the concurrency wait lets old reservations launch together in a burst.
+			await reserveIgdbRequestSlot();
+			const response = await fetchProvider(`${IGDB_BASE_URL}/${endpoint}`, {
+				method: "POST",
+				headers: {
+					Accept: "application/json",
+					Authorization: `Bearer ${await requestIgdbToken(env)}`,
+					"Client-ID": requireSecret(env.IGDB_CLIENT_ID, "IGDB_CLIENT_ID"),
+					"Content-Type": "text/plain",
+				},
+				body,
+			}, "IGDB");
+
+			if (response.status === 401 && remainingAuthRetries > 0) {
+				await response.body?.cancel();
+				igdbToken = undefined;
+				remainingAuthRetries -= 1;
+				retryDelayMs = 0;
+			} else if (response.status === 429 && remainingRateRetries > 0) {
+				await response.body?.cancel();
+				const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+				remainingRateRetries -= 1;
+				retryDelayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1_050;
+			} else {
+				if (response.status === 429) throw new ApiError(503, "IGDB rate limit reached. Try again shortly.");
+				return await readJsonResponse(response, "IGDB");
+			}
+		} finally {
+			// Always free the connection before delaying or retrying. Otherwise eight
+			// simultaneous retries can all wait for slots held by one another.
+			release();
+		}
+
+		if (retryDelayMs != null) await delay(retryDelayMs);
 	}
-	if (response.status === 429) throw new ApiError(503, "IGDB rate limit reached. Try again shortly.");
-	return readJsonResponse(response, "IGDB");
 }
 
 function encodeIgdbGameId(id: number): number {
@@ -500,8 +587,8 @@ function readResolveNames(url: URL): string[] {
 
 async function resolveIgdbGamesByName(env: WorkerEnv, names: string[]): Promise<unknown> {
 	const searchTerms = Array.from(new Set([...names, ...names.map(normalizeGameName)]));
-	const titleFilters = searchTerms.map((name) => `name ~ "${escapeSearch(name)}"`).join(" | ");
-	const body = `fields ${IGDB_LIST_FIELDS}; where cover != null & game_type = (0,4,8,9,10,11) & (${titleFilters}); limit ${Math.min(500, names.length * 10)};`;
+	const titleFilters = searchTerms.map((name) => `name ~ *"${escapeSearch(name)}"*`).join(" | ");
+	const body = `fields ${IGDB_LIST_FIELDS}; where cover != null & version_parent = null & game_type = (0,4,8,9,10,11) & (${titleFilters}); limit ${Math.min(500, names.length * 10)};`;
 	const candidates = (await igdbQuery(env, "games", body)) as IgdbGame[];
 
 	return {
@@ -509,8 +596,10 @@ async function resolveIgdbGamesByName(env: WorkerEnv, names: string[]): Promise<
 			source_name: sourceName,
 			game: (() => {
 				const wanted = normalizeGameName(sourceName);
-				const exact = candidates.find((game) => normalizeGameName(game.name) === wanted);
-				return exact ? mapIgdbGame(exact) : null;
+				const exact = candidates.filter((game) => normalizeGameName(game.name) === wanted);
+				// Choosing the first homonym would silently attach old ratings and
+				// lists to an arbitrary remake. Leave ambiguous titles unresolved.
+				return exact.length === 1 ? mapIgdbGame(exact[0]) : null;
 			})(),
 		})),
 	};
@@ -530,7 +619,7 @@ function parseDateRange(value: string): [number, number] {
 }
 
 function buildListQuery(url: URL, page: number, pageSize: number): string {
-	const clauses = ["cover != null", "game_type = (0,4,8,9,10,11)"];
+	const clauses = ["cover != null", "version_parent = null", "game_type = (0,4,8,9,10,11)"];
 	const search = url.searchParams.get("search")?.trim() ?? "";
 	if (search.length > 120) throw new ApiError(400, "Search is too long.");
 
@@ -702,7 +791,7 @@ async function handleSteam(request: Request, env: WorkerEnv, url: URL): Promise<
 	}
 
 	upstream.searchParams.set("key", requireSecret(env.STEAM_API_KEY, "STEAM_API_KEY"));
-	const response = await fetch(upstream, { headers: { Accept: "application/json" } });
+	const response = await fetchProvider(upstream, { headers: { Accept: "application/json" } }, "Steam");
 	return jsonResponse(await readJsonResponse(response, "Steam"));
 }
 
@@ -712,16 +801,26 @@ async function handleTranslate(request: Request, env: WorkerEnv): Promise<Respon
 		throw new ApiError(415, "Expected application/json.");
 	}
 
+	const declaredLength = Number(request.headers.get("content-length") ?? 0);
+	if (Number.isFinite(declaredLength) && declaredLength > MAX_TRANSLATE_BODY_BYTES) {
+		throw new ApiError(413, "Translation request body is too large.");
+	}
+
 	let payload: unknown;
 	try {
-		payload = await request.json();
-	} catch {
+		const body = await request.text();
+		if (new TextEncoder().encode(body).byteLength > MAX_TRANSLATE_BODY_BYTES) {
+			throw new ApiError(413, "Translation request body is too large.");
+		}
+		payload = JSON.parse(body);
+	} catch (error) {
+		if (error instanceof ApiError) throw error;
 		throw new ApiError(400, "Invalid JSON body.");
 	}
 	const text = typeof (payload as { text?: unknown })?.text === "string" ? (payload as { text: string }).text.trim() : "";
 	if (!text || text.length > 500) throw new ApiError(400, "text must contain between 1 and 500 characters.");
 
-	const response = await fetch(DEEPL_URL, {
+	const response = await fetchProvider(DEEPL_URL, {
 		method: "POST",
 		headers: {
 			Authorization: `DeepL-Auth-Key ${requireSecret(env.DEEPL_API_KEY, "DEEPL_API_KEY")}`,
@@ -729,7 +828,7 @@ async function handleTranslate(request: Request, env: WorkerEnv): Promise<Respon
 			Accept: "application/json",
 		},
 		body: JSON.stringify({ text: [text], source_lang: "EN", target_lang: "FR" }),
-	});
+	}, "DeepL");
 	return jsonResponse(await readJsonResponse(response, "DeepL"));
 }
 

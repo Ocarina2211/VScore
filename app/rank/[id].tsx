@@ -10,10 +10,11 @@ import { getGameHeroCover } from '../../constants/CustomCovers';
 import { getRank, XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { deleteRatingFromFirestore, fetchGameStats, GameStats, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
-import { isSameGame } from '../../services/gameIdentity';
+import { fetchGameStats, GameStats, queueRatingDeletion, syncPendingRatingDeletions, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
+import { findSameGameIndex, withoutSameGame } from '../../services/gameIdentity';
 import { fetchGameDetail } from '../../services/games';
-import { loadData, saveData, USER_KEYS } from '../../services/storage';
+import { rescheduleInactivityReminderAsync } from '../../services/notifications';
+import { loadData, removeData, saveData, USER_KEYS } from '../../services/storage';
 
 function StarIcon({ index, value, starColor, emptyColor }: { index: number; value: number; starColor: string; emptyColor: string }) {
   const isFull = index <= Math.floor(value);
@@ -21,14 +22,6 @@ function StarIcon({ index, value, starColor, emptyColor }: { index: number; valu
   const name = isFull ? 'star' : isHalf ? 'star-half' : 'star-outline';
   return <Ionicons name={name} size={30} color={(isFull || isHalf) ? starColor : emptyColor} />;
 }
-
-const CRITERIA_META: Record<string, { label: string; icon: string }> = {
-  general:  { label: 'Overall',    icon: 'star' },
-  graphics: { label: 'Graphics',   icon: 'color-palette' },
-  gameplay: { label: 'Gameplay',   icon: 'game-controller' },
-  story:    { label: 'Story',      icon: 'book' },
-  lifespan: { label: 'Lifespan',   icon: 'time' },
-};
 
 function CommunityAvgLabel({ communityAvg, secondaryColor }: { communityAvg: number; secondaryColor: string }) {
   const t = useTranslation();
@@ -93,6 +86,7 @@ export default function RankGameScreen() {
   const [completed, setCompleted] = useState(false);
   const [communityStats, setCommunityStats] = useState<GameStats | null>(null);
   const savedRef = useRef<any>(null);
+  const autoSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const btnAnim = useRef(new Animated.Value(0)).current;
   const [errors, setErrors] = useState<string[]>([]);
   const [top3Modal, setTop3Modal] = useState(false);
@@ -104,21 +98,23 @@ export default function RankGameScreen() {
   const [xpGainLabel, setXpGainLabel] = useState<string | null>(null);
   const [comment, setComment] = useState('');
   const [hoursPlayed, setHoursPlayed] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const router = useRouter();
 
-  const syncProfileToCloud = async (newXP: number, newTop3: any[]) => {
+  const syncProfileToCloud = async (newXP: number, newTop3: any[], allowXpDecrease = false) => {
     try {
-      const [profile, lists] = await Promise.all([
-        loadData(USER_KEYS.profile),
-        loadData(USER_KEYS.lists),
-      ]);
-      syncPublicProfile(
-        (profile ?? {}).pseudo ?? 'PSEUDO',
-        (profile ?? {}).avatarUri ?? null,
+      const profile = (await loadData(USER_KEYS.profile)) ?? {};
+      await saveData(USER_KEYS.profile, { ...profile, _updatedAt: Date.now() });
+      if (allowXpDecrease) await saveData(USER_KEYS.profileXpDecreasePending, true);
+      const synced = await syncPublicProfile(
+        profile.pseudo ?? 'PSEUDO',
+        profile.avatarUri ?? null,
         newXP,
         newTop3,
-        lists ?? []
-      ).catch(() => {});
+        { allowXpDecrease }
+      );
+      if (synced && allowXpDecrease) await removeData(USER_KEYS.profileXpDecreasePending);
     } catch {}
   };
 
@@ -133,30 +129,67 @@ export default function RankGameScreen() {
   };
 
   useEffect(() => {
-    Promise.all([
-      fetchGameDetail(Number(id)),
-      loadData(USER_KEYS.ratings),
-      loadData(USER_KEYS.top3),
-    ]).then(([data, storedRatings, top3]) => {
-      setGame(data);
-      setLoading(false);
-      fetchGameStats(data.id, data.name).then(setCommunityStats);
-      const existing = (storedRatings ?? []).find((rating: any) => isSameGame(rating, data));
-      if (existing) {
-        setGeneral(existing.general ?? 0);
-        setGraphics(existing.graphics ?? 0);
-        setGameplay(existing.gameplay ?? 0);
-        setStory(existing.story ?? existing.soundtrack ?? 0);
-        setLifespan(existing.lifespan ?? 0);
-        setCompleted(existing.completed ?? false);
-        setComment(existing.comment ?? '');
-        setHoursPlayed(existing.hoursPlayed ?? null);
-        savedRef.current = existing;
-        setAlreadyRated(true);
+    let active = true;
+    setLoading(true);
+    setLoadError(false);
+    setGame(null);
+    setCommunityStats(null);
+    savedRef.current = null;
+    setAlreadyRated(false);
+    setGeneral(0);
+    setGraphics(0);
+    setGameplay(0);
+    setStory(0);
+    setLifespan(0);
+    setCompleted(false);
+    setComment('');
+    setHoursPlayed(null);
+    setIsInTop3(false);
+
+    (async () => {
+      try {
+        const [data, storedRatings, top3] = await Promise.all([
+          fetchGameDetail(Number(id)),
+          loadData(USER_KEYS.ratings),
+          loadData(USER_KEYS.top3),
+        ]);
+        if (!active) return;
+        setGame(data);
+        setLoading(false);
+        fetchGameStats(data.id, data.name).then((stats) => {
+          if (active) setCommunityStats(stats);
+        });
+        const existingIndex = findSameGameIndex(storedRatings ?? [], data);
+        const existing = existingIndex >= 0 ? storedRatings[existingIndex] : null;
+        const inTop3 = findSameGameIndex(top3 ?? [], data) >= 0;
+        if (existing) {
+          setGeneral(existing.general ?? 0);
+          setGraphics(existing.graphics ?? 0);
+          setGameplay(existing.gameplay ?? 0);
+          setStory(existing.story ?? existing.soundtrack ?? 0);
+          setLifespan(existing.lifespan ?? 0);
+          setCompleted(existing.completed ?? false);
+          setComment(existing.comment ?? '');
+          setHoursPlayed(existing.hoursPlayed ?? null);
+          // Legacy entries predate this marker. Preserve their historical XP
+          // behavior when they are currently in the top 3.
+          savedRef.current = {
+            ...existing,
+            top3XpAwarded: existing.top3XpAwarded ?? inTop3,
+          };
+          setAlreadyRated(true);
+        }
+        setIsInTop3(inTop3);
+      } catch (error) {
+        if (!active) return;
+        console.warn('[Rank] Failed to load game:', error instanceof Error ? error.message : error);
+        setLoading(false);
+        setLoadError(true);
       }
-      setIsInTop3((top3 ?? []).some((entry: any) => isSameGame(entry, data)));
-    });
-  }, [id]);
+    })();
+
+    return () => { active = false; };
+  }, [id, loadAttempt]);
 
   const checkDirty = (g: number, gr: number, gp: number, st: number, ls: number, c: boolean) => {
     const s = savedRef.current;
@@ -165,30 +198,55 @@ export default function RankGameScreen() {
       || st !== (s.story ?? s.soundtrack ?? 0) || ls !== (s.lifespan ?? 0) || c !== (s.completed ?? false);
   };
 
+  const syncStoredRating = async (rating: any, previousId?: number | string | null) => {
+    await saveData(USER_KEYS.lastRatingDate, Date.now());
+    void loadData(USER_KEYS.notificationsEnabled).then((enabled) => {
+      if (enabled !== false) {
+        return rescheduleInactivityReminderAsync(t.notifTitle, t.notifBody);
+      }
+    }).catch(() => {});
+    if (previousId != null && String(previousId) !== String(rating.id)) {
+      await queueRatingDeletion(Number(previousId));
+      await syncPendingRatingDeletions();
+    }
+    const synced = await syncRatingToFirestore({
+      gameId: rating.id,
+      gameName: rating.name,
+      gameImage: rating.background_image,
+      general: rating.general ?? 0,
+      graphics: rating.graphics ?? 0,
+      gameplay: rating.gameplay ?? 0,
+      story: rating.story ?? 0,
+      lifespan: rating.lifespan ?? 0,
+      completed: rating.completed ?? false,
+      comment: rating.comment,
+      hoursPlayed: rating.hoursPlayed ?? undefined,
+      top3XpAwarded: rating.top3XpAwarded,
+    });
+    if (!synced) return false;
+    const stored = (await loadData(USER_KEYS.ratings)) || [];
+    const index = findSameGameIndex(stored, rating);
+    if (index >= 0) {
+      stored[index] = { ...stored[index], synced: true };
+      await saveData(USER_KEYS.ratings, stored);
+    }
+    return true;
+  };
+
   // Auto-saves a field patch instantly to local storage + Firestore (non-blocking).
   // Optimistically updates savedRef so dirty checks are immediately correct.
   const autoSave = (patch: Record<string, any>) => {
     if (savedRef.current) savedRef.current = { ...savedRef.current, ...patch };
-    (async () => {
+    autoSaveQueueRef.current = autoSaveQueueRef.current.then(async () => {
       const ratings = (await loadData(USER_KEYS.ratings)) || [];
-      const i = ratings.findIndex((r: any) => isSameGame(r, game));
+      const i = findSameGameIndex(ratings, game);
       if (i < 0) return;
-      ratings[i] = { ...ratings[i], ...patch, synced: false };
+      const previousId = ratings[i].id;
+      ratings[i] = { ...ratings[i], ...patch, id: game.id, name: game.name, background_image: game.background_image, _updatedAt: Date.now(), synced: false };
       await saveData(USER_KEYS.ratings, ratings);
       savedRef.current = ratings[i];
-      syncRatingToFirestore({
-        gameId: ratings[i].id, gameName: game.name, gameImage: game.background_image,
-        general: ratings[i].general ?? 0, graphics: ratings[i].graphics ?? 0,
-        gameplay: ratings[i].gameplay ?? 0, story: ratings[i].story ?? 0,
-        lifespan: ratings[i].lifespan ?? 0, completed: ratings[i].completed ?? false,
-        comment: ratings[i].comment, hoursPlayed: ratings[i].hoursPlayed ?? undefined,
-      }).then(async (ok) => {
-        if (!ok) return;
-        const stored = (await loadData(USER_KEYS.ratings)) || [];
-        const si = stored.findIndex((r: any) => isSameGame(r, game));
-        if (si >= 0) { stored[si] = { ...stored[si], synced: true }; await saveData(USER_KEYS.ratings, stored); }
-      });
-    })();
+      await syncStoredRating(ratings[i], previousId);
+    }).catch((error) => console.warn('[Rank] Auto-save failed:', error));
   };
 
   const onStarChange = (setter: (v: number) => void, field: string, v: number,
@@ -211,25 +269,31 @@ export default function RankGameScreen() {
     return false;
   };
 
-  const handleSaveEdit = async () => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSaving(true);
+  const saveRatingEdits = async () => {
     const existing = savedRef.current;
-    const rating = { id: existing?.id ?? game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existing?.ratedAt ?? Date.now() };
+    const rating = { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existing?.ratedAt ?? Date.now(), _updatedAt: Date.now(), top3XpAwarded: existing?.top3XpAwarded === true, synced: false };
     const ratings = await loadData(USER_KEYS.ratings) || [];
-    const idx = ratings.findIndex((r: any) => isSameGame(r, game));
+    const idx = findSameGameIndex(ratings, game);
     if (idx >= 0) ratings[idx] = rating; else ratings.push(rating);
     await saveData(USER_KEYS.ratings, ratings);
-    const synced = await syncRatingToFirestore({ gameId: rating.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined });
-    if (synced) {
-      const updatedRatings = await loadData(USER_KEYS.ratings) || [];
-      const si = updatedRatings.findIndex((r: any) => isSameGame(r, game));
-      if (si >= 0) { updatedRatings[si] = { ...updatedRatings[si], synced: true }; await saveData(USER_KEYS.ratings, updatedRatings); }
-    }
-    savedRef.current = rating;
+    const synced = await syncStoredRating(rating, existing?.id);
+    savedRef.current = { ...rating, synced };
     setIsDirty(false);
     Animated.spring(btnAnim, { toValue: 0, useNativeDriver: true }).start();
-    setSaving(false);
+    return savedRef.current;
+  };
+
+  const handleSaveEdit = async () => {
+    if (saving) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSaving(true);
+    try {
+      await saveRatingEdits();
+    } catch (error) {
+      console.warn('[Rank] Failed to save rating changes:', error);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleValidate = async (addToTop3: boolean) => {
@@ -248,66 +312,68 @@ export default function RankGameScreen() {
     setErrors([]);
     setSaving(true);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const ratings = await loadData(USER_KEYS.ratings) || [];
-    const xp = await loadData(USER_KEYS.xp) || 0;
-    const top3 = await loadData(USER_KEYS.top3) || [];
+    try {
+      const [ratingsValue, xpValue, top3Value] = await Promise.all([
+        loadData(USER_KEYS.ratings),
+        loadData(USER_KEYS.xp),
+        loadData(USER_KEYS.top3),
+      ]);
+      const ratings = ratingsValue || [];
+      const xp = xpValue || 0;
+      const top3 = top3Value || [];
+      const existingIndex = findSameGameIndex(ratings, game);
+      const existingRating = existingIndex >= 0 ? ratings[existingIndex] : null;
+      const alreadyIn = findSameGameIndex(top3, game) >= 0;
+      const rating = {
+        id: game.id,
+        name: game.name,
+        background_image: game.background_image,
+        general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed,
+        ratedAt: existingRating?.ratedAt ?? Date.now(),
+        _updatedAt: Date.now(),
+        top3XpAwarded: existingRating?.top3XpAwarded === true,
+        synced: false,
+      };
 
-    const existingRating = (await loadData(USER_KEYS.ratings) || []).find((r: any) => isSameGame(r, game));
-    const rating = { id: existingRating?.id ?? game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed, ratedAt: existingRating?.ratedAt ?? Date.now() };
-
-    // Sync to Firestore (non-blocking) and mark as synced on success
-    syncRatingToFirestore({ gameId: rating.id, gameName: game.name, gameImage: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment, hoursPlayed: hoursPlayed ?? undefined })
-      .then(async (ok) => {
-        if (ok) {
-          const stored = await loadData(USER_KEYS.ratings) || [];
-          const si = stored.findIndex((r: any) => isSameGame(r, game));
-          if (si >= 0) { stored[si] = { ...stored[si], synced: true }; await saveData(USER_KEYS.ratings, stored); }
-        }
-      });
-
-    const existingIndex = ratings.findIndex((r: any) => isSameGame(r, game));
-    if (existingIndex >= 0) ratings[existingIndex] = rating;
-    else ratings.push(rating);
-
-    await saveData(USER_KEYS.ratings, ratings);
-
-    if (addToTop3) {
-      const alreadyIn = top3.some((g: any) => isSameGame(g, game));
-      if (!alreadyIn && top3.length >= 3) {
-        // Top 3 full — show replacement popup
+      // Do not persist the rating or grant XP until the replacement is chosen.
+      // Otherwise cancelling this modal lets the same rating grant XP twice.
+      if (addToTop3 && !alreadyIn && top3.length >= 3) {
         setPendingRating(rating);
         setCurrentTop3(top3);
         setTop3Modal(true);
-        setSaving(false); // Reset saving since we are opening the replacement modal
-        // Still save base XP
-        const oldRank = getRank(xp);
-        const newXP = xp + XP_PER_RATING;
-        await saveData(USER_KEYS.xp, newXP);
-        syncProfileToCloud(newXP, top3);
-        const newRank = getRank(newXP);
-        const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
-        if (levelUp) router.setParams({ pendingLevelUp: levelUp });
+        setSaving(false);
         return;
       }
-      const newTop3 = [...top3.filter((g: any) => !isSameGame(g, game)), rating].slice(-3);
-      await saveData(USER_KEYS.top3, newTop3);
+
+      const isNewRating = existingIndex < 0;
+      const top3XpGain = addToTop3 && !alreadyIn && isNewRating ? XP_PER_TOP3 : 0;
+      const savedRating = {
+        ...rating,
+        top3XpAwarded: rating.top3XpAwarded || top3XpGain > 0,
+      };
+      if (existingIndex >= 0) ratings[existingIndex] = savedRating;
+      else ratings.push(savedRating);
+      await saveData(USER_KEYS.ratings, ratings);
+      void syncStoredRating(savedRating, existingRating?.id);
+
+      const newTop3 = addToTop3
+        ? [...withoutSameGame(top3, game), savedRating].slice(-3)
+        : top3;
+      if (addToTop3) await saveData(USER_KEYS.top3, newTop3);
+
+      const ratingXpGain = isNewRating ? XP_PER_RATING : 0;
+      const totalGain = ratingXpGain + top3XpGain;
       const oldRank = getRank(xp);
-      const newXP = xp + XP_PER_RATING + XP_PER_TOP3;
+      const newXP = xp + totalGain;
       await saveData(USER_KEYS.xp, newXP);
       syncProfileToCloud(newXP, newTop3);
       const newRank = getRank(newXP);
       const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
-      showXpAndNavigate(XP_PER_RATING + XP_PER_TOP3, `/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}`);
-      return;
+      showXpAndNavigate(totalGain, `/success?addedToTop3=${addToTop3}&levelUp=${encodeURIComponent(levelUp)}`);
+    } catch (error) {
+      console.warn('[Rank] Failed to save rating:', error);
+      setSaving(false);
     }
-
-    const oldRank = getRank(xp);
-    const newXP = xp + XP_PER_RATING;
-    await saveData(USER_KEYS.xp, newXP);
-    syncProfileToCloud(newXP, top3);
-    const newRank = getRank(newXP);
-    const levelUp = oldRank.name !== newRank.name ? newRank.name : '';
-    showXpAndNavigate(XP_PER_RATING, `/success?addedToTop3=${addToTop3}&levelUp=${encodeURIComponent(levelUp)}`);
   };
 
   const handleAddExistingToTop3 = async () => {
@@ -315,13 +381,27 @@ export default function RankGameScreen() {
     setSaving(true);
     try {
       // Save any pending edits first
-      if (isDirty) await handleSaveEdit();
-      const rating = savedRef.current ?? { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment };
+      if (isDirty) await saveRatingEdits();
+      let rating = {
+        ...(savedRef.current ?? { id: game.id, name: game.name, background_image: game.background_image, general, graphics, gameplay, story, lifespan, completed, comment }),
+        top3XpAwarded: savedRef.current?.top3XpAwarded === true,
+        _updatedAt: Date.now(),
+        synced: false,
+      };
+      const ratings = await loadData(USER_KEYS.ratings) || [];
+      const ratingIndex = findSameGameIndex(ratings, game);
+      const previousId = ratingIndex >= 0 ? ratings[ratingIndex].id : null;
+      if (ratingIndex >= 0) ratings[ratingIndex] = rating;
+      else ratings.push(rating);
+      await saveData(USER_KEYS.ratings, ratings);
+      savedRef.current = rating;
+      void syncStoredRating(rating, previousId);
       const top3 = await loadData(USER_KEYS.top3) || [];
-      const alreadyIn = top3.some((g: any) => isSameGame(g, game));
+      const alreadyIn = findSameGameIndex(top3, game) >= 0;
       if (alreadyIn) {
         // Update the entry in top 3 without extra XP
-        const newTop3 = top3.map((g: any) => isSameGame(g, game) ? rating : g);
+        const matchingTop3Index = findSameGameIndex(top3, game);
+        const newTop3 = top3.map((entry: any, index: number) => index === matchingTop3Index ? rating : entry);
         await saveData(USER_KEYS.top3, newTop3);
         setIsInTop3(true);
         const currentXp = await loadData(USER_KEYS.xp) || 0;
@@ -350,7 +430,8 @@ export default function RankGameScreen() {
       setCurrentTop3(top3);
       setTop3Modal(true);
       setSaving(false); // Reset saving since we are opening the replacement modal
-    } catch (e) {
+    } catch (error) {
+      console.warn('[Rank] Failed to add rating to top 3:', error);
       setSaving(false);
     }
   };
@@ -365,12 +446,26 @@ export default function RankGameScreen() {
       Animated.timing(swapAnim, { toValue: 2, duration: 300, useNativeDriver: true }),
     ]).start(async () => {
       try {
+        const isNewRating = !alreadyRated;
+        const savedRating = {
+          ...pendingRating,
+          top3XpAwarded: pendingRating?.top3XpAwarded === true || isNewRating,
+          _updatedAt: Date.now(),
+          synced: false,
+        };
         const newTop3 = [...currentTop3];
-        newTop3[indexToReplace] = pendingRating;
+        newTop3[indexToReplace] = savedRating;
         const xp = await loadData(USER_KEYS.xp) || 0;
+        const ratings = await loadData(USER_KEYS.ratings) || [];
+        const ratingIndex = findSameGameIndex(ratings, game);
+        const previousId = ratingIndex >= 0 ? ratings[ratingIndex].id : null;
+        if (ratingIndex >= 0) ratings[ratingIndex] = savedRating;
+        else ratings.push(savedRating);
+        await saveData(USER_KEYS.ratings, ratings);
+        void syncStoredRating(savedRating, previousId);
         await saveData(USER_KEYS.top3, newTop3);
-        // user decided to put a game in their top 3 which is already in their rated games -> 0 XP gained
-        const xpAward = alreadyRated ? 0 : XP_PER_TOP3;
+        // A new rating earns both rewards. Moving an already-rated game earns 0 XP.
+        const xpAward = isNewRating ? XP_PER_RATING + XP_PER_TOP3 : 0;
         const newXP = xp + xpAward;
         await saveData(USER_KEYS.xp, newXP);
         syncProfileToCloud(newXP, newTop3);
@@ -384,7 +479,8 @@ export default function RankGameScreen() {
         } else {
           router.push(`/success?addedToTop3=true&levelUp=${encodeURIComponent(levelUp)}` as any);
         }
-      } catch (err) {
+      } catch (error) {
+        console.warn('[Rank] Failed to replace top 3 game:', error);
         setSaving(false);
       }
     });
@@ -392,28 +488,41 @@ export default function RankGameScreen() {
 
   const handleRemoveRating = () => {
     if (saving) return;
+    const losesTop3Xp = isInTop3 && savedRef.current?.top3XpAwarded !== false;
     Alert.alert(
-      'Retirer cette note',
-      `Supprimer ta note pour "${game?.name}" ? Tu perdras ${XP_PER_RATING} XP${isInTop3 ? ` + ${XP_PER_TOP3} XP (Top 3)` : ''}.`,
+      t.rankRemoveTitle,
+      t.rankRemoveMessage(game?.name ?? '', XP_PER_RATING, XP_PER_TOP3, losesTop3Xp),
       [
-        { text: 'Annuler', style: 'cancel' },
+        { text: t.rankCancel, style: 'cancel' },
         {
-          text: 'Retirer',
+          text: t.rankRemoveButton,
           style: 'destructive',
           onPress: async () => {
             setSaving(true);
             try {
               const ratings: any[] = (await loadData(USER_KEYS.ratings)) ?? [];
-              const ratingToRemove = ratings.find((rating: any) => isSameGame(rating, game));
-              const newRatings = ratings.filter((rating: any) => !isSameGame(rating, game));
+              const ratingIndex = findSameGameIndex(ratings, game);
+              const ratingToRemove = ratingIndex >= 0 ? ratings[ratingIndex] : null;
+              if (!ratingToRemove) {
+                setSaving(false);
+                router.back();
+                return;
+              }
+              const newRatings = ratingIndex >= 0
+                ? ratings.filter((_, index) => index !== ratingIndex)
+                : ratings;
+              const deletedGameId = Number(ratingToRemove?.id ?? id);
+              await queueRatingDeletion(deletedGameId);
               await saveData(USER_KEYS.ratings, newRatings);
 
-              let xpLost = XP_PER_RATING;
               const top3: any[] = (await loadData(USER_KEYS.top3)) ?? [];
+              const top3Index = findSameGameIndex(top3, game);
+              const actuallyInTop3 = top3Index >= 0;
+              const top3XpWasAwarded = ratingToRemove.top3XpAwarded !== false;
+              let xpLost = XP_PER_RATING + (actuallyInTop3 && top3XpWasAwarded ? XP_PER_TOP3 : 0);
               let newTop3 = top3;
-              if (isInTop3) {
-                xpLost += XP_PER_TOP3;
-                newTop3 = top3.filter((entry: any) => !isSameGame(entry, game));
+              if (actuallyInTop3) {
+                newTop3 = withoutSameGame(top3, game);
                 await saveData(USER_KEYS.top3, newTop3);
               }
 
@@ -426,11 +535,12 @@ export default function RankGameScreen() {
               const profile = (await loadData(USER_KEYS.profile)) ?? {};
               await saveData(USER_KEYS.profile, { ...profile, _updatedAt: Date.now() });
 
-              deleteRatingFromFirestore(ratingToRemove?.id ?? Number(id));
-              syncProfileToCloud(newXP, newTop3);
+              void syncPendingRatingDeletions();
+              syncProfileToCloud(newXP, newTop3, true);
 
               router.back();
-            } catch (err) {
+            } catch (error) {
+              console.warn('[Rank] Failed to remove rating:', error);
               setSaving(false);
             }
           },
@@ -456,6 +566,19 @@ export default function RankGameScreen() {
           <SkeletonBox width="100%" height={56} borderRadius={16} />
         </View>
       </ScrollView>
+    </View>
+  );
+
+  if (loadError || !game) return (
+    <View style={styles.loadErrorRoot}>
+      <TouchableOpacity style={styles.loadErrorBack} onPress={() => router.back()}>
+        <Ionicons name="chevron-back" size={22} color={colors.text} />
+      </TouchableOpacity>
+      <Ionicons name="cloud-offline-outline" size={44} color={colors.textSecondary} />
+      <Text style={styles.loadErrorText}>{t.commonLoadError}</Text>
+      <TouchableOpacity style={styles.retryButton} onPress={() => setLoadAttempt((attempt) => attempt + 1)}>
+        <Text style={styles.retryButtonText}>{t.commonRetry}</Text>
+      </TouchableOpacity>
     </View>
   );
 
@@ -646,7 +769,7 @@ export default function RankGameScreen() {
           activeOpacity={0.75}
         >
           <Ionicons name="trash-outline" size={18} color="#E74C3C" style={{ marginRight: 8 }} />
-          <Text style={styles.removeBtnText}>Retirer cette note</Text>
+          <Text style={styles.removeBtnText}>{t.rankRemoveTitle}</Text>
         </TouchableOpacity>
       )}
     </ScrollView>
@@ -735,6 +858,11 @@ export default function RankGameScreen() {
 
 const makeStyles = (c: any) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background },
+  loadErrorRoot: { flex: 1, backgroundColor: c.background, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 16 },
+  loadErrorBack: { position: 'absolute', top: 56, left: 16, width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: c.backgroundSecondary },
+  loadErrorText: { color: c.textSecondary, fontSize: 15, lineHeight: 21, textAlign: 'center' },
+  retryButton: { backgroundColor: c.primary, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 12 },
+  retryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
 
   // Hero
   heroWrapper: { position: 'relative', height: 260 },

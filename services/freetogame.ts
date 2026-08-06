@@ -125,9 +125,17 @@ async function getCatalog(): Promise<any[]> {
 
   catalogRequest = getJson<FreeToGameListItem[]>(`${BASE_URL}/games?sort-by=popularity`)
     .then((items) => {
+      if (!Array.isArray(items)) throw new Error('FreeToGame returned an invalid catalog');
       const data = items.map(mapGame);
       catalogCache = { data, ts: Date.now() };
       return data;
+    })
+    .catch((error) => {
+      // This provider is already the outage fallback; an expired in-memory
+      // catalog is still preferable to turning a transient second outage into
+      // an empty application.
+      if (catalogCache) return catalogCache.data;
+      throw error;
     })
     .finally(() => {
       catalogRequest = null;
@@ -192,7 +200,7 @@ export async function fetchFallbackGames({
 
 export async function fetchFallbackGameDetail(id: number): Promise<any> {
   const providerId = toProviderId(id);
-  if (!Number.isInteger(providerId) || providerId < 0) {
+  if (!Number.isInteger(providerId) || providerId <= 0) {
     throw new Error('Invalid fallback game id');
   }
   const detail = await getJson<FreeToGameDetail>(`${BASE_URL}/game?id=${providerId}`);

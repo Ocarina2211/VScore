@@ -23,82 +23,92 @@ const db = getFirestore();
 
 const LEO_UID = 'test-user-leo-001';
 
-const top3 = [
-  {
-    id: 3498,
+// Client-side catalog IDs are the IGDB numeric ID plus 1,000,000,000.
+// Steam headers keep this fixture independent from the retired RAWG CDN.
+const games = {
+  witcher3: {
+    gameId: 1_000_001_942,
     name: 'The Witcher 3: Wild Hunt',
-    background_image: 'https://media.rawg.io/media/games/618/618c2031a07bbff6b4f611f10b6bcdbc.jpg',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/292030/header.jpg',
   },
-  {
-    id: 28,
+  redDead2: {
+    gameId: 1_000_025_076,
     name: 'Red Dead Redemption 2',
-    background_image: 'https://media.rawg.io/media/games/511/5118aff5091cb3efec399c808f8c598f.jpg',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/1174180/header.jpg',
   },
-  {
-    id: 58175,
+  godOfWar: {
+    gameId: 1_000_019_560,
     name: 'God of War',
-    background_image: 'https://media.rawg.io/media/games/4be/4be6a6ad0364751a96229c56bf69be73.jpg',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/1593500/header.jpg',
   },
-];
+  cyberpunk2077: {
+    gameId: 1_000_001_877,
+    name: 'Cyberpunk 2077',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/1091500/header.jpg',
+  },
+  portal2: {
+    gameId: 1_000_000_072,
+    name: 'Portal 2',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/620/header.jpg',
+  },
+  eldenRing: {
+    gameId: 1_000_119_133,
+    name: 'Elden Ring',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/1245620/header.jpg',
+  },
+  battlefield1: {
+    gameId: 1_000_018_320,
+    name: 'Battlefield 1',
+    background_image: 'https://cdn.cloudflare.steamstatic.com/steam/apps/1238840/header.jpg',
+  },
+};
 
 const ratedGames = [
   {
-    gameId: 3498,
-    name: 'The Witcher 3: Wild Hunt',
-    background_image: 'https://media.rawg.io/media/games/618/618c2031a07bbff6b4f611f10b6bcdbc.jpg',
+    ...games.witcher3,
     general: 5, graphics: 5, gameplay: 5, story: 5, lifespan: 5,
-    completed: true,
+    completed: true, top3XpAwarded: true,
   },
   {
-    gameId: 28,
-    name: 'Red Dead Redemption 2',
-    background_image: 'https://media.rawg.io/media/games/511/5118aff5091cb3efec399c808f8c598f.jpg',
+    ...games.redDead2,
     general: 5, graphics: 5, gameplay: 4, story: 5, lifespan: 4,
-    completed: true,
+    completed: true, top3XpAwarded: true,
   },
   {
-    gameId: 58175,
-    name: 'God of War',
-    background_image: 'https://media.rawg.io/media/games/4be/4be6a6ad0364751a96229c56bf69be73.jpg',
+    ...games.godOfWar,
     general: 5, graphics: 5, gameplay: 5, story: 4, lifespan: 4,
-    completed: true,
+    completed: true, top3XpAwarded: true,
   },
   {
-    gameId: 41494,
-    name: 'Cyberpunk 2077',
-    background_image: 'https://media.rawg.io/media/games/26d/26d4437715bee60138dab4a7c8c59c92.jpg',
+    ...games.cyberpunk2077,
     general: 4, graphics: 5, gameplay: 4, story: 4, lifespan: 3,
     completed: true,
   },
   {
-    gameId: 4200,
-    name: 'Portal 2',
-    background_image: 'https://media.rawg.io/media/games/328/3283617cb7d75d67257fc58339188742.jpg',
+    ...games.portal2,
     general: 5, graphics: 4, gameplay: 5, story: 4, lifespan: 3,
     completed: true,
   },
   {
-    gameId: 12020,
-    name: 'Elden Ring',
-    background_image: 'https://media.rawg.io/media/games/b29/b294f90eb90c07cbbe9e72f62aacd443.jpg',
+    ...games.eldenRing,
     general: 4, graphics: 4, gameplay: 5, story: 3, lifespan: 5,
     completed: false,
   },
   {
-    gameId: 3070,
-    name: 'Battlefield 1',
-    background_image: 'https://media.rawg.io/media/games/b45/b45575f34285f2c4479c9a5f8d8a6519.jpg',
+    ...games.battlefield1,
     general: 3, graphics: 4, gameplay: 3, story: 3, lifespan: 3,
     completed: false,
   },
 ];
+
+const top3 = ratedGames.slice(0, 3).map(({ gameId, ...rating }) => ({ id: gameId, ...rating }));
 
 // Upsert public profile
 await db.doc(`users/${LEO_UID}`).set({
   pseudo: 'Leo',
   pseudoLower: 'leo',
   avatarUri: '',
-  xp: 2400,
+  xp: ratedGames.length * 200 + top3.length * 300,
   top3,
   updatedAt: Timestamp.now(),
 });

@@ -6,12 +6,14 @@ import { Language, TRANSLATIONS, Translations } from '../constants/translations'
 export type LanguagePref = Language | 'system';
 
 type I18nContextType = {
+  isReady: boolean;
   languagePref: LanguagePref;
   setLanguagePref: (pref: LanguagePref) => void;
   t: Translations;
 };
 
 const I18nContext = createContext<I18nContextType>({
+  isReady: false,
   languagePref: 'system',
   setLanguagePref: () => {},
   t: TRANSLATIONS.en,
@@ -30,17 +32,20 @@ function resolveLanguage(pref: LanguagePref): Language {
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [languagePref, setLanguagePrefState] = useState<LanguagePref>('system');
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    AsyncStorage.getItem(LANG_KEY).then((val) => {
-      if (val === 'en' || val === 'fr' || val === 'system') {
-        setLanguagePrefState(val);
-      } else {
-        // First launch — default to system
-        setLanguagePrefState('system');
-        AsyncStorage.setItem(LANG_KEY, 'system');
-      }
-    });
+    AsyncStorage.getItem(LANG_KEY)
+      .then((val) => {
+        if (val === 'en' || val === 'fr' || val === 'system') {
+          setLanguagePrefState(val);
+        } else {
+          // First launch — default to system
+          setLanguagePrefState('system');
+          AsyncStorage.setItem(LANG_KEY, 'system');
+        }
+      })
+      .finally(() => setIsReady(true));
   }, []);
 
   const setLanguagePref = useCallback((pref: LanguagePref) => {
@@ -51,13 +56,14 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const resolvedLang = resolveLanguage(languagePref);
 
   return (
-    <I18nContext.Provider value={{ languagePref, setLanguagePref, t: TRANSLATIONS[resolvedLang] }}>
+    <I18nContext.Provider value={{ isReady, languagePref, setLanguagePref, t: TRANSLATIONS[resolvedLang] }}>
       {children}
     </I18nContext.Provider>
   );
 }
 
 export const useTranslation = () => useContext(I18nContext).t;
+export const useI18nReady = () => useContext(I18nContext).isReady;
 export const useLanguage = () => {
   const { languagePref, setLanguagePref } = useContext(I18nContext);
   return { languagePref, setLanguagePref };

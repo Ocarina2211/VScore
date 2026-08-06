@@ -13,9 +13,7 @@ export interface SteamGame {
  * Returns null if not found.
  */
 export async function resolveVanityUrl(vanityName: string): Promise<string | null> {
-  console.log('[Steam] resolveVanityUrl:', vanityName);
   const json = await apiFetch<any>(`/steam/resolve?vanity=${encodeURIComponent(vanityName)}`);
-  console.log('[Steam] vanity response:', JSON.stringify(json));
   if (json.response?.success === 1) return json.response.steamid;
   return null;
 }
@@ -28,7 +26,6 @@ export async function resolveVanityUrl(vanityName: string): Promise<string | nul
  */
 export async function parseSteamInput(input: string): Promise<string | null> {
   const trimmed = input.trim();
-  console.log('[Steam] parseSteamInput:', JSON.stringify(trimmed));
 
   // Pure numeric Steam ID (17 digits)
   if (/^\d{17}$/.test(trimmed)) return trimmed;
@@ -46,7 +43,6 @@ export async function parseSteamInput(input: string): Promise<string | null> {
     return resolveVanityUrl(trimmed);
   }
 
-  console.log('[Steam] parseSteamInput: no pattern matched');
   return null;
 }
 
@@ -55,9 +51,7 @@ export async function parseSteamInput(input: string): Promise<string | null> {
  * Returns the player's display name or null.
  */
 export async function getSteamPlayerName(steamId: string): Promise<string | null> {
-  console.log('[Steam] getSteamPlayerName for:', steamId);
   const json = await apiFetch<any>(`/steam/player?steamId=${encodeURIComponent(steamId)}`);
-  console.log('[Steam] player response:', JSON.stringify(json));
   const players = json.response?.players;
   if (players && players.length > 0) return players[0].personaname;
   return null;

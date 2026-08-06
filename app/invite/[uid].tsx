@@ -2,14 +2,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { getRank } from '../../constants/Games';
+import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { getRelationStatus, getUserPublicProfile, sendFriendRequest, type PublicProfile, type RelationStatus } from '../../services/community';
 import { auth } from '../../services/firebase';
 
 export default function InviteScreen() {
   const colors = useColors();
+  const t = useTranslation();
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const { uid: inviterUid } = useLocalSearchParams<{ uid: string }>();
   const router = useRouter();
@@ -19,27 +21,46 @@ export default function InviteScreen() {
   const [status, setStatus] = useState<RelationStatus>('none');
   const [sending, setSending] = useState(false);
   const [done, setDone] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     if (!inviterUid) return;
+    let active = true;
+    setLoading(true);
+    setLoadError(false);
     (async () => {
-      const p = await getUserPublicProfile(inviterUid);
-      setProfile(p);
-      if (p && auth.currentUser && !auth.currentUser.isAnonymous) {
-        const s = await getRelationStatus(inviterUid).catch(() => 'none' as RelationStatus);
-        setStatus(s);
+      try {
+        const p = await getUserPublicProfile(inviterUid);
+        if (!active) return;
+        setProfile(p);
+        if (p && auth.currentUser && !auth.currentUser.isAnonymous) {
+          const s = await getRelationStatus(inviterUid).catch(() => 'none' as RelationStatus);
+          if (active) setStatus(s);
+        }
+      } catch {
+        if (active) {
+          setProfile(null);
+          setLoadError(true);
+        }
+      } finally {
+        if (active) setLoading(false);
       }
-      setLoading(false);
     })();
+    return () => { active = false; };
   }, [inviterUid]);
 
   const handleAdd = async () => {
-    if (!inviterUid) return;
+    if (!inviterUid || sending) return;
     setSending(true);
-    await sendFriendRequest(inviterUid).catch(() => {});
-    setStatus('sent');
-    setDone(true);
-    setSending(false);
+    try {
+      await sendFriendRequest(inviterUid);
+      setStatus('sent');
+      setDone(true);
+    } catch {
+      Alert.alert(t.commonErrorTitle, t.inviteSendError);
+    } finally {
+      setSending(false);
+    }
   };
 
   const myUid = auth.currentUser?.uid;
@@ -57,9 +78,9 @@ export default function InviteScreen() {
         <ActivityIndicator color={colors.primary} style={{ marginTop: 80 }} />
       ) : !profile ? (
         <View style={styles.center}>
-          <Text style={styles.errorText}>Utilisateur introuvable.</Text>
+          <Text style={styles.errorText}>{loadError ? t.commonLoadError : t.inviteNotFound}</Text>
           <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(tabs)')}>
-            <Text style={styles.btnText}>{"Retour à l'accueil"}</Text>
+            <Text style={styles.btnText}>{t.inviteBackHome}</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -79,35 +100,35 @@ export default function InviteScreen() {
             <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.name}</Text>
           )}
 
-          <Text style={styles.subtitle}>{"t'invite à le rejoindre sur VScore"}</Text>
+          <Text style={styles.subtitle}>{t.inviteSubtitle}</Text>
 
           {!isLoggedIn ? (
             <>
-              <Text style={styles.hint}>Connecte-toi pour ajouter cet utilisateur en ami.</Text>
+              <Text style={styles.hint}>{t.inviteLoginHint}</Text>
               <TouchableOpacity style={styles.btn} onPress={() => router.replace('/login')}>
-                <Text style={styles.btnText}>Se connecter</Text>
+                <Text style={styles.btnText}>{t.inviteLogin}</Text>
               </TouchableOpacity>
             </>
           ) : isSelf ? (
-            <Text style={styles.hint}>{"C'est ton propre lien d'invitation 😄"}</Text>
+            <Text style={styles.hint}>{t.inviteOwnLink}</Text>
           ) : done || status === 'sent' ? (
             <View style={styles.successBox}>
               <Ionicons name="checkmark-circle" size={28} color={colors.accent} />
-              <Text style={styles.successText}>Demande envoyée !</Text>
+              <Text style={styles.successText}>{t.inviteSent}</Text>
             </View>
           ) : status === 'friends' ? (
             <View style={styles.successBox}>
               <Ionicons name="people" size={28} color={colors.primary} />
-              <Text style={styles.successText}>Vous êtes déjà amis.</Text>
+              <Text style={styles.successText}>{t.inviteAlreadyFriends}</Text>
             </View>
           ) : (
             <TouchableOpacity style={styles.btn} onPress={handleAdd} disabled={sending}>
-              <Text style={styles.btnText}>{sending ? '...' : 'Ajouter en ami'}</Text>
+              <Text style={styles.btnText}>{sending ? '...' : t.inviteAdd}</Text>
             </TouchableOpacity>
           )}
 
           <TouchableOpacity style={styles.homeLink} onPress={() => router.replace('/(tabs)')}>
-            <Text style={styles.homeLinkText}>Aller sur VScore</Text>
+            <Text style={styles.homeLinkText}>{t.inviteHome}</Text>
           </TouchableOpacity>
         </View>
       )}

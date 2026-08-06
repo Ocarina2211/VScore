@@ -1,61 +1,3 @@
-/** Restore ALL user data from Firestore to local storage (profil, xp, top3, lists, ratings) */
-export async function restoreAllUserDataFromCloud(): Promise<void> {
-  try {
-    const uid = getUid();
-    // Profil, XP, Top3
-    const snap = await getDocFromServer(doc(db, 'users', uid));
-    if (snap.exists()) {
-      const data = snap.data();
-      const remoteUpdatedAt = data.updatedAt?.toMillis?.() ?? 0;
-      const localProfile: any = (await loadData(USER_KEYS.profile)) ?? {};
-      const localUpdatedAt = localProfile._updatedAt ?? 0;
-      const newProfile = {
-        ...localProfile,
-        pseudo: data.pseudo ?? localProfile.pseudo ?? 'PSEUDO',
-        avatarUri: data.avatarUri || localProfile.avatarUri || '',
-        _updatedAt: remoteUpdatedAt,
-      };
-      await saveData(USER_KEYS.profile, newProfile);
-      // XP: always take the highest value (never go down)
-      const remoteXp = typeof data.xp === 'number' ? data.xp : 0;
-      const localXp: number = (await loadData(USER_KEYS.xp)) ?? 0;
-      await saveData(USER_KEYS.xp, Math.max(localXp, remoteXp));
-      // Top3 and Lists: only restore from remote if remote is strictly newer than local
-      if (remoteUpdatedAt > localUpdatedAt) {
-        await saveData(USER_KEYS.top3, Array.isArray(data.top3) ? data.top3 : []);
-        await saveData(USER_KEYS.lists, Array.isArray(data.lists) ? data.lists : []);
-      }
-    }
-    // Ratings
-    const ratingsSnap = await getDocsFromServer(collection(db, 'ratings', uid, 'games'));
-    if (!ratingsSnap.empty) {
-      const localRatings: any[] = await loadData(USER_KEYS.ratings) || [];
-      const serverRatings = ratingsSnap.docs.map((d) => {
-        const data = d.data();
-        const local = localRatings.find((r: any) => r.id === Number(d.id));
-        return {
-          id: Number(d.id),
-          name: data.name ?? '',
-          background_image: data.background_image ?? '',
-          general: data.general ?? 0,
-          graphics: data.graphics ?? 0,
-          gameplay: data.gameplay ?? 0,
-          story: data.story ?? 0,
-          lifespan: data.lifespan ?? 0,
-          avg: data.avg ?? 0,
-          completed: data.completed ?? false,
-          comment: data.comment ?? local?.comment,
-          hoursPlayed: data.hoursPlayed ?? local?.hoursPlayed,
-          ratedAt: local?.ratedAt,
-          synced: true,
-        };
-      });
-      await saveData(USER_KEYS.ratings, serverRatings);
-    }
-  } catch (e) {
-    // console.warn('restoreAllUserDataFromCloud failed:', e);
-  }
-}
 /**
  * community.ts — Firestore interactions for shared community data.
  *
@@ -84,16 +26,152 @@ import {
     where
 } from 'firebase/firestore';
 
+import { isIgdbGameId } from '../constants/Games';
 import { auth, db } from './firebase';
-import { gameNameLookupCandidates, normalizeGameName } from './gameIdentity';
-import { loadData, saveData, USER_KEYS } from './storage';
+import {
+  dedupeGamesByIdentity,
+  gameNameLookupCandidates,
+  groupGamesByIdentity,
+  hasMeaningfulRating,
+  isSameGame,
+  normalizeGameName,
+} from './gameIdentity';
+import { loadData, removeData, saveData, USER_KEYS } from './storage';
+
+type PendingRatingDeletion = { id: number; deletedAt: number; ownerUid: string };
+let ratingDeletionSync: Promise<Set<number>> = Promise.resolve(new Set());
+let ratingDeletionStorageQueue: Promise<void> = Promise.resolve();
+let ratingsCloudSync: Promise<boolean> = Promise.resolve(true);
+let listsCloudSync: Promise<boolean> = Promise.resolve(true);
+
+function storedRatingAverage(rating: Record<string, any> | null | undefined): number {
+  if (Number.isFinite(rating?.avg)) return Number(rating?.avg);
+  return (
+    Number(rating?.general ?? 0)
+    + Number(rating?.graphics ?? 0)
+    + Number(rating?.gameplay ?? 0)
+    + Number(rating?.lifespan ?? 0)
+  ) / 4;
+}
+
+async function loadPendingRatingDeletions(): Promise<PendingRatingDeletion[]> {
+  const value = await loadData(USER_KEYS.ratingDeletions);
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is PendingRatingDeletion =>
+    Number.isSafeInteger(entry?.id)
+    && Number.isFinite(entry?.deletedAt)
+    && typeof entry?.ownerUid === 'string'
+    && entry.ownerUid.length > 0
+  );
+}
+
+async function updatePendingRatingDeletions(
+  update: (current: PendingRatingDeletion[]) => PendingRatingDeletion[]
+): Promise<PendingRatingDeletion[]> {
+  let result: PendingRatingDeletion[] = [];
+  const mutation = ratingDeletionStorageQueue.then(async () => {
+    result = update(await loadPendingRatingDeletions());
+    if (result.length > 0) await saveData(USER_KEYS.ratingDeletions, result);
+    else await removeData(USER_KEYS.ratingDeletions);
+  });
+  ratingDeletionStorageQueue = mutation.catch(() => {});
+  await mutation;
+  return result;
+}
+
+export async function queueRatingDeletion(gameId: number): Promise<void> {
+  if (!Number.isSafeInteger(gameId)) return;
+  const ownerUid = auth.currentUser?.uid;
+  // With no Firebase session there cannot be a user-scoped cloud rating to
+  // delete. Never leave an unowned tombstone that a later account could apply.
+  if (!ownerUid) return;
+  await updatePendingRatingDeletions((pending) => [
+    ...pending.filter((entry) => entry.id !== gameId || entry.ownerUid !== ownerUid),
+    { id: gameId, deletedAt: Date.now(), ownerUid },
+  ]);
+}
+
+async function clearPendingRatingDeletion(gameId: number, ownerUid: string): Promise<void> {
+  await updatePendingRatingDeletions((pending) =>
+    pending.filter((entry) => entry.id !== gameId || entry.ownerUid !== ownerUid)
+  );
+}
+
+function mergeRemoteRatings(localRatings: any[], remoteRatings: any[]): any[] {
+  type TaggedRating = any & { _mergeSource: 'local' | 'remote'; _mergeIndex: number };
+  const tagged: TaggedRating[] = [
+    ...localRatings.filter(hasMeaningfulRating).map((rating, index) => ({
+      ...rating,
+      _mergeSource: 'local' as const,
+      _mergeIndex: index,
+    })),
+    ...remoteRatings.filter(hasMeaningfulRating).map((rating, index) => ({
+      ...rating,
+      _mergeSource: 'remote' as const,
+      _mergeIndex: index,
+    })),
+  ];
+  const updatedAt = (rating: any) => Number(rating._updatedAt ?? rating.updatedAt ?? rating.ratedAt ?? 0);
+  const newest = (ratings: TaggedRating[]) => [...ratings].sort((a, b) =>
+    updatedAt(b) - updatedAt(a) || b._mergeIndex - a._mergeIndex
+  )[0];
+
+  return groupGamesByIdentity(tagged).flatMap((group) => {
+    const locals = group.filter((rating) => rating._mergeSource === 'local');
+    const remotes = group.filter((rating) => rating._mergeSource === 'remote');
+    const local = locals.length > 0 ? newest(locals) : null;
+    const remote = remotes.length > 0 ? newest(remotes) : null;
+
+    // A rating confirmed as synced but now absent remotely was deleted on
+    // another device. Legacy/unsynced local data remains uploadable.
+    if (!remote && local?.synced === true) return [];
+    if (!remote && !local) return [];
+
+    const identity = [...group].sort((a, b) => {
+      const canonicalDifference = Number(isIgdbGameId(Number(b.id))) - Number(isIgdbGameId(Number(a.id)));
+      return canonicalDifference || updatedAt(b) - updatedAt(a);
+    })[0];
+    let merged: any;
+    if (!local) {
+      merged = { ...remote, synced: true };
+    } else if (!remote) {
+      merged = { ...local, synced: false };
+    } else if (updatedAt(remote) >= updatedAt(local) || local.synced === true) {
+      merged = {
+        ...local,
+        ...remote,
+        comment: remote.comment ?? local.comment,
+        hoursPlayed: remote.hoursPlayed ?? local.hoursPlayed ?? null,
+        ratedAt: local.ratedAt ?? remote.ratedAt,
+        synced: true,
+      };
+    } else {
+      merged = { ...local, synced: false };
+    }
+
+    const { _mergeSource, _mergeIndex, ...clean } = merged;
+    const identityId = Number(identity.id ?? identity.gameId);
+    const canonicalId = Number.isSafeInteger(identityId) ? identityId : clean.id;
+    const remoteNeedsMigration = Number.isSafeInteger(identityId)
+      && remotes.some((rating) => Number(rating.id) !== identityId);
+    return [{
+      ...clean,
+      id: canonicalId,
+      name: identity.name || clean.name,
+      background_image: identity.background_image || clean.background_image,
+      // Duplicate/cross-provider remote documents need one canonical rewrite
+      // before their obsolete IDs can be safely removed.
+      synced: remoteNeedsMigration ? false : clean.synced,
+    }];
+  });
+}
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 export function getUid(): string {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('User not authenticated');
-  return uid;
+  const user = auth.currentUser;
+  if (!user || user.isAnonymous) throw new Error('Registered user not authenticated');
+  return user.uid;
 }
 
 // ─── Save a rating and update aggregated stats ───────────────────────────────
@@ -110,40 +188,47 @@ export interface RatingPayload {
   completed?: boolean;
   comment?: string;
   hoursPlayed?: string;
+  top3XpAwarded?: boolean;
 }
 
 export async function syncRatingToFirestore(payload: RatingPayload): Promise<boolean> {
   try {
     const uid = getUid();
-    const { gameId, gameName, gameImage, completed, comment, hoursPlayed, ...scores } = payload;
+    const { gameId, gameName, gameImage, completed, comment, hoursPlayed, top3XpAwarded, ...scores } = payload;
+    // Finish an older deletion before re-rating the same game so an in-flight
+    // tombstone can never delete the newly written rating afterward.
+    await syncPendingRatingDeletions();
+    if (auth.currentUser?.uid !== uid) return false;
+    await clearPendingRatingDeletion(gameId, uid);
     const avg = (scores.general + scores.graphics + scores.gameplay + scores.lifespan) / 4;
 
-    // Read old rating BEFORE writing, to detect new vs update and compute deltas
     const ratingRef = doc(db, 'ratings', uid, 'games', String(gameId));
-    const oldRatingSnap = await getDoc(ratingRef);
-    const isNewRating = !oldRatingSnap.exists();
-    const oldData = isNewRating ? null : oldRatingSnap.data();
-    const oldCompleted: boolean = oldData?.completed ?? false;
-    const completedDelta = (completed ? 1 : 0) - (oldCompleted ? 1 : 0);
-
-    // Write individual rating (include name + image so friends can see it)
-    await setDoc(ratingRef, {
-      ...scores,
-      avg,
-      name: gameName,
-      nameKey: normalizeGameName(gameName),
-      background_image: gameImage,
-      completed: completed ?? false,
-      ...(comment ? { comment } : {}),
-      ...(hoursPlayed ? { hoursPlayed } : {}),
-      updatedAt: serverTimestamp(),
-    });
-
-    // Update aggregated game_stats atomically
     const statsRef = doc(db, 'game_stats', String(gameId));
     await runTransaction(db, async (tx) => {
-      const snap = await tx.get(statsRef);
-      if (!snap.exists()) {
+      // The personal rating and its aggregate must commit together; otherwise
+      // a failed second write permanently corrupts the community counters.
+      const [oldRatingSnap, statsSnap] = await Promise.all([
+        tx.get(ratingRef),
+        tx.get(statsRef),
+      ]);
+      const isNewRating = !oldRatingSnap.exists();
+      const oldData = isNewRating ? null : oldRatingSnap.data();
+      const completedDelta = (completed ? 1 : 0) - (oldData?.completed ? 1 : 0);
+
+      tx.set(ratingRef, {
+        ...scores,
+        avg,
+        name: gameName,
+        nameKey: normalizeGameName(gameName),
+        background_image: gameImage,
+        completed: completed ?? false,
+        comment: comment ?? '',
+        hoursPlayed: hoursPlayed ?? null,
+        ...(top3XpAwarded != null ? { top3XpAwarded } : {}),
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+
+      if (!statsSnap.exists()) {
         // First rating ever for this game across all users
         tx.set(statsRef, {
           gameId,
@@ -168,11 +253,12 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
           updatedAt: serverTimestamp(),
         });
       } else {
-        const data = snap.data();
+        const data = statsSnap.data();
+        const storedCount = Number.isFinite(data.count) ? Math.max(0, Number(data.count)) : 0;
         // Only increment count for genuinely new ratings, not re-syncs or edits
-        const newCount = isNewRating ? data.count + 1 : data.count;
+        const newCount = isNewRating ? storedCount + 1 : Math.max(storedCount, 1);
         // For updates: subtract old scores then add new ones; for new: just add
-        const oldAvg    = oldData?.avg      ?? 0;
+        const oldAvg    = storedRatingAverage(oldData);
         const oldGen    = oldData?.general  ?? 0;
         const oldGfx    = oldData?.graphics ?? 0;
         const oldPlay   = oldData?.gameplay ?? 0;
@@ -218,40 +304,36 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
 
 // ─── Delete a rating from Firestore ─────────────────────────────────────────
 
-export async function deleteRatingFromFirestore(gameId: number): Promise<void> {
+export async function deleteRatingFromFirestore(gameId: number, expectedUid?: string): Promise<boolean> {
   try {
     const uid = getUid();
+    if (expectedUid && uid !== expectedUid) return false;
     const ratingRef = doc(db, 'ratings', uid, 'games', String(gameId));
-    const oldSnap = await getDoc(ratingRef);
-    if (!oldSnap.exists()) return;
-    const oldData = oldSnap.data();
-    const oldAvg = oldData?.avg ?? 0;
-    const oldGen = oldData?.general ?? 0;
-    const oldGfx = oldData?.graphics ?? 0;
-    const oldPlay = oldData?.gameplay ?? 0;
-    const oldStory = oldData?.story ?? 0;
-    const oldLife = oldData?.lifespan ?? 0;
-    const oldCompleted: boolean = oldData?.completed ?? false;
-
-    await deleteDoc(ratingRef);
-
     const statsRef = doc(db, 'game_stats', String(gameId));
     await runTransaction(db, async (tx) => {
-      const snap = await tx.get(statsRef);
-      if (!snap.exists()) return;
-      const data = snap.data();
+      // Keep the personal rating and its aggregate in the same atomic commit.
+      const [ratingSnap, statsSnap] = await Promise.all([
+        tx.get(ratingRef),
+        tx.get(statsRef),
+      ]);
+      if (!ratingSnap.exists()) return;
+      const oldData = ratingSnap.data();
+      tx.delete(ratingRef);
+      if (!statsSnap.exists()) return;
+
+      const data = statsSnap.data();
       const newCount = Math.max(0, (data.count ?? 0) - 1);
       if (newCount === 0) {
         tx.delete(statsRef);
         return;
       }
-      const newTotal         = Math.max(0, (data.totalScore    ?? 0) - oldAvg);
-      const newTotalGeneral  = Math.max(0, (data.totalGeneral  ?? 0) - oldGen);
-      const newTotalGraphics = Math.max(0, (data.totalGraphics ?? 0) - oldGfx);
-      const newTotalGameplay = Math.max(0, (data.totalGameplay ?? 0) - oldPlay);
-      const newTotalStory    = Math.max(0, (data.totalStory    ?? 0) - oldStory);
-      const newTotalLifespan = Math.max(0, (data.totalLifespan ?? 0) - oldLife);
-      const totalCompleted   = Math.max(0, (data.totalCompleted ?? 0) - (oldCompleted ? 1 : 0));
+      const newTotal         = Math.max(0, (data.totalScore    ?? 0) - storedRatingAverage(oldData));
+      const newTotalGeneral  = Math.max(0, (data.totalGeneral  ?? 0) - (oldData.general ?? 0));
+      const newTotalGraphics = Math.max(0, (data.totalGraphics ?? 0) - (oldData.graphics ?? 0));
+      const newTotalGameplay = Math.max(0, (data.totalGameplay ?? 0) - (oldData.gameplay ?? 0));
+      const newTotalStory    = Math.max(0, (data.totalStory    ?? 0) - (oldData.story ?? 0));
+      const newTotalLifespan = Math.max(0, (data.totalLifespan ?? 0) - (oldData.lifespan ?? 0));
+      const totalCompleted   = Math.max(0, (data.totalCompleted ?? 0) - (oldData.completed ? 1 : 0));
       tx.update(statsRef, {
         count: newCount,
         totalScore: newTotal,
@@ -271,9 +353,42 @@ export async function deleteRatingFromFirestore(gameId: number): Promise<void> {
         updatedAt: serverTimestamp(),
       });
     });
+    return true;
   } catch {
-    // Non-blocking
+    return false;
   }
+}
+
+/** Retry locally queued deletions and return IDs that still need cloud removal. */
+export function syncPendingRatingDeletions(): Promise<Set<number>> {
+  const run = async () => {
+    await ratingDeletionStorageQueue;
+    const pending = await loadPendingRatingDeletions();
+    if (pending.length === 0) return new Set<number>();
+    const sessionUid = auth.currentUser?.uid;
+    if (!sessionUid) return new Set<number>();
+    const sessionPending = pending.filter((entry) => entry.ownerUid === sessionUid);
+    if (sessionPending.length === 0) return new Set<number>();
+    let uid: string;
+    try {
+      uid = getUid();
+    } catch {
+      return new Set(sessionPending.map((entry) => entry.id));
+    }
+    if (uid !== sessionUid) return new Set(sessionPending.map((entry) => entry.id));
+    const deleted = new Set<number>();
+    for (const entry of sessionPending) {
+      if (await deleteRatingFromFirestore(entry.id, uid)) deleted.add(entry.id);
+    }
+    const remaining = await updatePendingRatingDeletions((current) =>
+      current.filter((entry) => entry.ownerUid !== uid || !deleted.has(entry.id))
+    );
+    return new Set(
+      remaining.filter((entry) => entry.ownerUid === uid).map((entry) => entry.id)
+    );
+  };
+  ratingDeletionSync = ratingDeletionSync.then(run, run);
+  return ratingDeletionSync;
 }
 
 // ─── Fetch stats for a single game ───────────────────────────────────────────
@@ -320,11 +435,30 @@ function combineGameStats(stats: GameStatsDocument[]): GameStats | null {
   };
 }
 
+function matchingStatsDocuments(
+  game: { id: number; name?: string },
+  documents: GameStatsDocument[]
+): GameStatsDocument[] {
+  const marker = {
+    gameId: game.id,
+    name: game.name ?? '',
+    count: 0,
+    avgScore: 0,
+    requestedGameMarker: true,
+  };
+  const group = groupGamesByIdentity([marker, ...documents])
+    .find((entries) => entries.includes(marker));
+  return (group ?? []).filter((entry): entry is GameStatsDocument => entry !== marker);
+}
+
 export async function fetchGameStats(gameId: number, gameName = ''): Promise<GameStats | null> {
   try {
     const documents = new Map<string, GameStatsDocument>();
     const direct = await getDoc(doc(db, 'game_stats', String(gameId)));
-    if (direct.exists()) documents.set(direct.id, direct.data() as GameStatsDocument);
+    if (direct.exists()) {
+      const data = direct.data() as GameStatsDocument;
+      documents.set(direct.id, { ...data, gameId: data.gameId ?? Number(direct.id) });
+    }
 
     const nameKey = normalizeGameName(gameName);
     if (gameName && nameKey) {
@@ -335,11 +469,15 @@ export async function fetchGameStats(gameId: number, gameName = ''): Promise<Gam
       ]);
       [...exactName.docs, ...normalizedName.docs].forEach((snapshot) => {
         const data = snapshot.data() as GameStatsDocument;
-        if (normalizeGameName(data.name) === nameKey) documents.set(snapshot.id, data);
+        const candidate = { ...data, gameId: data.gameId ?? Number(snapshot.id) };
+        documents.set(snapshot.id, candidate);
       });
     }
 
-    return combineGameStats(Array.from(documents.values()));
+    return combineGameStats(matchingStatsDocuments(
+      { id: gameId, name: gameName },
+      Array.from(documents.values())
+    ));
   } catch (e) {
     // console.warn('fetchGameStats failed:', e);
     return null;
@@ -385,7 +523,10 @@ export async function fetchBatchGameStats(
       if (values.length === 0) return;
       try {
         const snapshot = await getDocs(query(collection(db, 'game_stats'), where(field, 'in', values)));
-        snapshot.docs.forEach((entry) => documents.set(entry.id, entry.data() as GameStatsDocument));
+        snapshot.docs.forEach((entry) => {
+          const data = entry.data() as GameStatsDocument;
+          documents.set(entry.id, { ...data, gameId: data.gameId ?? Number(entry.id) });
+        });
       } catch {
         // One compatibility lookup failing must not hide successful ID lookups.
       }
@@ -398,9 +539,7 @@ export async function fetchBatchGameStats(
 
     const result: Record<number, { avg: number; count: number }> = {};
     requested.forEach((game) => {
-      const matches = Array.from(documents.values()).filter((entry) =>
-        entry.gameId === game.id || (!!game.nameKey && normalizeGameName(entry.name) === game.nameKey)
-      );
+      const matches = matchingStatsDocuments(game, Array.from(documents.values()));
       const combined = combineGameStats(matches);
       // Require at least 3 votes for a meaningful community badge.
       if (combined && combined.count >= 3) {
@@ -425,16 +564,18 @@ export async function fetchCommunityTopRated(
       limit(60) // fetch a larger pool to allow shuffling for variety
     );
     const snap = await getDocs(q);
-    const groups = new Map<string, GameStatsDocument[]>();
-    snap.docs.forEach((snapshot) => {
+    const entries = snap.docs.map((snapshot) => {
       const data = snapshot.data() as GameStatsDocument;
-      const key = normalizeGameName(data.name) || `id:${data.gameId ?? snapshot.id}`;
-      groups.set(key, [...(groups.get(key) ?? []), data]);
+      return { ...data, gameId: data.gameId ?? Number(snapshot.id) };
     });
-    const results: CommunityGame[] = Array.from(groups.values()).flatMap((entries) => {
+    const groups = groupGamesByIdentity(entries);
+    const results: CommunityGame[] = groups.flatMap((entries) => {
       const combined = combineGameStats(entries);
       if (!combined) return [];
-      const representative = [...entries].sort((a, b) => (b.count ?? 0) - (a.count ?? 0))[0];
+      const representative = [...entries].sort((a, b) => {
+        const canonicalDifference = Number(isIgdbGameId(Number(b.gameId))) - Number(isIgdbGameId(Number(a.gameId)));
+        return canonicalDifference || (b.count ?? 0) - (a.count ?? 0);
+      })[0];
       return [{
         ...combined,
         gameId: representative.gameId ?? 0,
@@ -510,31 +651,28 @@ export async function syncPublicProfile(
   avatarUri: string | null,
   xp: number,
   top3?: any[],
-  lists?: any[]
-): Promise<void> {
+  options: { allowXpDecrease?: boolean } = {}
+): Promise<boolean> {
   try {
     const uid = getUid();
     const userRef = doc(db, 'users', uid);
-    // Read from server (not cache) to get the real current XP before writing
-    const serverSnap = await getDocFromServer(userRef);
-    const serverXp: number = serverSnap.exists() ? (serverSnap.data().xp ?? 0) : 0;
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(userRef);
-      const currentXp: number = Math.max(snap.exists() ? (snap.data().xp ?? 0) : 0, serverXp);
+      const currentXp: number = snap.exists() ? (snap.data().xp ?? 0) : 0;
       const data: Record<string, any> = {
         pseudo,
         pseudoLower: pseudo.toLowerCase(),
-        xp: Math.max(xp, currentXp), // XP never goes down
-        verified: true,
+        xp: options.allowXpDecrease ? Math.max(0, xp) : Math.max(xp, currentXp),
         updatedAt: serverTimestamp(),
       };
       if (avatarUri) data.avatarUri = avatarUri;
       if (top3 !== undefined) data.top3 = top3;
-      if (lists !== undefined) data.lists = lists;
       tx.set(userRef, data, { merge: true });
     });
+    return true;
   } catch (e) {
-    // console.warn('syncPublicProfile error:', e);
+    console.warn('[Sync] Public profile sync failed:', e instanceof Error ? e.message : e);
+    return false;
   }
 }
 
@@ -616,24 +754,35 @@ export async function getGlobalLeaderboard(maxUsers = 100): Promise<PublicProfil
 
 /** Get a user's rated games from Firestore */
 export async function getUserPublicRatings(uid: string): Promise<any[]> {
-  try {
-    
-    const snap = await getDocs(collection(db, 'ratings', uid, 'games'));
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  } catch (e) {
-    return [];
-  }
+  const snap = await getDocs(collection(db, 'ratings', uid, 'games'));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
 /** Send a friend request (idempotent — doc id = fromUid_toUid) */
 export async function sendFriendRequest(toUid: string): Promise<void> {
   const fromUid = getUid();
-  const reqId = `${fromUid}_${toUid}`;
-  await setDoc(doc(db, 'friend_requests', reqId), {
-    fromUid,
-    toUid,
-    status: 'pending',
-    createdAt: serverTimestamp(),
+  if (!toUid || toUid === fromUid) throw new Error('Invalid friend request target');
+  const outgoingRef = doc(db, 'friend_requests', `${fromUid}_${toUid}`);
+  const incomingRef = doc(db, 'friend_requests', `${toUid}_${fromUid}`);
+  await runTransaction(db, async (tx) => {
+    const [outgoing, incoming] = await Promise.all([tx.get(outgoingRef), tx.get(incomingRef)]);
+    if (outgoing.exists() && ['pending', 'accepted'].includes(outgoing.data().status)) return;
+    if (incoming.exists()) {
+      const incomingStatus = incoming.data().status;
+      if (incomingStatus === 'accepted') return;
+      if (incomingStatus === 'pending') {
+        tx.update(incomingRef, { status: 'accepted' });
+        if (outgoing.exists()) tx.delete(outgoingRef);
+        return;
+      }
+      tx.delete(incomingRef);
+    }
+    tx.set(outgoingRef, {
+      fromUid,
+      toUid,
+      status: 'pending',
+      createdAt: serverTimestamp(),
+    });
   });
 }
 
@@ -646,30 +795,39 @@ export async function cancelFriendRequest(toUid: string): Promise<void> {
 /** Accept a received friend request */
 export async function acceptFriendRequest(fromUid: string): Promise<void> {
   const toUid = getUid();
-  await updateDoc(doc(db, 'friend_requests', `${fromUid}_${toUid}`), {
-    status: 'accepted',
+  const incomingRef = doc(db, 'friend_requests', `${fromUid}_${toUid}`);
+  const outgoingRef = doc(db, 'friend_requests', `${toUid}_${fromUid}`);
+  await runTransaction(db, async (tx) => {
+    const [incoming, outgoing] = await Promise.all([tx.get(incomingRef), tx.get(outgoingRef)]);
+    if (!incoming.exists()) throw new Error('Friend request no longer exists');
+    tx.update(incomingRef, { status: 'accepted' });
+    if (outgoing.exists()) tx.delete(outgoingRef);
   });
 }
 
 /** Decline a received friend request */
 export async function declineFriendRequest(fromUid: string): Promise<void> {
   const toUid = getUid();
-  await updateDoc(doc(db, 'friend_requests', `${fromUid}_${toUid}`), {
-    status: 'rejected',
+  const incomingRef = doc(db, 'friend_requests', `${fromUid}_${toUid}`);
+  const outgoingRef = doc(db, 'friend_requests', `${toUid}_${fromUid}`);
+  await runTransaction(db, async (tx) => {
+    const [incoming, outgoing] = await Promise.all([tx.get(incomingRef), tx.get(outgoingRef)]);
+    if (!incoming.exists()) return;
+    tx.update(incomingRef, { status: 'rejected' });
+    if (outgoing.exists() && outgoing.data().status === 'pending') tx.delete(outgoingRef);
   });
 }
 
 /** Remove a friend (delete the accepted request doc in either direction) */
 export async function removeFriend(friendUid: string): Promise<void> {
   const myUid = getUid();
-  const id1 = `${myUid}_${friendUid}`;
-  const id2 = `${friendUid}_${myUid}`;
-  const [s1, s2] = await Promise.all([
-    getDoc(doc(db, 'friend_requests', id1)),
-    getDoc(doc(db, 'friend_requests', id2)),
-  ]);
-  if (s1.exists()) await deleteDoc(doc(db, 'friend_requests', id1));
-  if (s2.exists()) await deleteDoc(doc(db, 'friend_requests', id2));
+  const firstRef = doc(db, 'friend_requests', `${myUid}_${friendUid}`);
+  const secondRef = doc(db, 'friend_requests', `${friendUid}_${myUid}`);
+  await runTransaction(db, async (tx) => {
+    const [first, second] = await Promise.all([tx.get(firstRef), tx.get(secondRef)]);
+    if (first.exists()) tx.delete(firstRef);
+    if (second.exists()) tx.delete(secondRef);
+  });
 }
 
 /** Get the relationship status between the current user and another user */
@@ -681,16 +839,14 @@ export async function getRelationStatus(otherUid: string): Promise<RelationStatu
     getDoc(doc(db, 'friend_requests', id1)),
     getDoc(doc(db, 'friend_requests', id2)),
   ]);
-  if (s1.exists()) {
-    const st = s1.data()!.status;
-    if (st === 'accepted') return 'friends';
-    if (st === 'pending') return 'sent';
-  }
-  if (s2.exists()) {
-    const st = s2.data()!.status;
-    if (st === 'accepted') return 'friends';
-    if (st === 'pending') return 'received';
-  }
+  const firstStatus = s1.exists() ? s1.data()!.status : null;
+  const secondStatus = s2.exists() ? s2.data()!.status : null;
+  if (firstStatus === 'accepted' || secondStatus === 'accepted') return 'friends';
+  // Legacy crossed requests remain actionable: expose the incoming side so the
+  // user can accept it and the transactional accept path removes the duplicate.
+  if (firstStatus === 'pending' && secondStatus === 'pending') return 'received';
+  if (firstStatus === 'pending') return 'sent';
+  if (secondStatus === 'pending') return 'received';
   return 'none';
 }
 
@@ -720,8 +876,12 @@ export async function getFriends(): Promise<FriendRequest[]> {
         .filter((d) => d.data().status === 'accepted')
         .map((d) => ({ id: d.id, ...d.data() } as FriendRequest)),
     ];
-    await attachProfiles(all, myUid);
-    return all;
+    const unique = Array.from(new Map(all.map((request) => {
+      const friendUid = request.fromUid === myUid ? request.toUid : request.fromUid;
+      return [friendUid, request] as const;
+    })).values());
+    await attachProfiles(unique, myUid);
+    return unique;
   } catch (e) {
     // console.warn('getFriends error:', e);
     return [];
@@ -765,6 +925,7 @@ export async function getReceivedRequests(): Promise<FriendRequest[]> {
 /** Get a feed of recent ratings from all friends (last 30 items across friends) */
 export async function getFriendsFeed(maxPerFriend = 5): Promise<FeedItem[]> {
   try {
+    const perFriendLimit = Math.min(20, Math.max(1, Math.floor(maxPerFriend)));
     const friends = await getFriends();
     if (friends.length === 0) return [];
 
@@ -779,7 +940,8 @@ export async function getFriendsFeed(maxPerFriend = 5): Promise<FeedItem[]> {
             query(
               collection(db, 'ratings', friendUid, 'games'),
               orderBy('updatedAt', 'desc'),
-              limit(maxPerFriend)
+              // Leave room for a temporary legacy + canonical duplicate.
+              limit(Math.min(30, perFriendLimit * 2))
             )
           );
           snap.docs.forEach((d) => {
@@ -796,11 +958,23 @@ export async function getFriendsFeed(maxPerFriend = 5): Promise<FeedItem[]> {
               comment: data.comment,
             });
           });
-        } catch {}
+        } catch (error) {
+          console.warn('[Friends] Failed to load friend feed item:', error instanceof Error ? error.message : error);
+        }
       })
     );
 
-    return allItems.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50);
+    const itemsByFriend = new Map<string, FeedItem[]>();
+    allItems.forEach((item) => {
+      itemsByFriend.set(item.uid, [...(itemsByFriend.get(item.uid) ?? []), item]);
+    });
+    const deduped = [...itemsByFriend.values()].flatMap((items) =>
+      groupGamesByIdentity(items)
+        .map((group) => [...group].sort((a, b) => b.updatedAt - a.updatedAt)[0])
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, perFriendLimit)
+    );
+    return deduped.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50);
   } catch {
     return [];
   }
@@ -824,35 +998,39 @@ export async function getFriendsTopGames(
     if (friends.length === 0) return [];
 
     const myUid = getUid();
-    const gameMap = new Map<string, { id: number; name: string; background_image: string; pseudos: string[] }>();
-
-    await Promise.all(
+    const likedEntries = (await Promise.all(
       friends.map(async (f) => {
         const friendUid = f.fromUid === myUid ? f.toUid : f.fromUid;
         const pseudo = f.profile?.pseudo ?? '?';
         // Reuse getUserPublicRatings which is confirmed to work
         const ratings = await getUserPublicRatings(friendUid);
-        ratings
+        return ratings
           .filter((r) => (r.general ?? 0) >= minScore)
-          .forEach((r) => {
-            const key = String(r.id);
-            const existing = gameMap.get(key);
-            if (existing) {
-              existing.pseudos.push(pseudo);
-            } else {
-              gameMap.set(key, {
-                id: Number(r.id),
-                name: r.name ?? '',
-                background_image: r.background_image ?? '',
-                pseudos: [pseudo],
-              });
-            }
-          });
+          .map((r) => ({
+            id: Number(r.id),
+            name: r.name ?? '',
+            background_image: r.background_image ?? '',
+            friendUid,
+            pseudo,
+          }));
       })
-    );
+    )).flat();
 
-    const raw = Array.from(gameMap.values())
-      .sort((a, b) => b.pseudos.length - a.pseudos.length)
+    const raw = groupGamesByIdentity(likedEntries)
+      .map((group) => {
+        const representative = [...group].sort((a, b) => {
+          const canonicalDifference = Number(isIgdbGameId(b.id)) - Number(isIgdbGameId(a.id));
+          const imageDifference = Number(Boolean(b.background_image)) - Number(Boolean(a.background_image));
+          return canonicalDifference || imageDifference;
+        })[0];
+        return {
+          id: representative.id,
+          name: representative.name,
+          background_image: representative.background_image,
+          likedBy: new Map(group.map((entry) => [entry.friendUid, entry.pseudo])),
+        };
+      })
+      .sort((a, b) => b.likedBy.size - a.likedBy.size)
       .slice(0, maxResults);
 
     // Patch missing name/image from game_stats (for ratings created before these fields were stored)
@@ -874,16 +1052,18 @@ export async function getFriendsTopGames(
               entry.background_image = data.background_image ?? '';
             }
           });
-        } catch {}
+        } catch (error) {
+          console.warn('[Friends] Failed to load friend top games:', error instanceof Error ? error.message : error);
+        }
       }));
     }
 
-    return raw.map(({ id, name, background_image, pseudos }) => ({
+    return raw.map(({ id, name, background_image, likedBy }) => ({
       id,
       name,
       background_image,
-      likedByCount: pseudos.length,
-      likedByPseudos: pseudos,
+      likedByCount: likedBy.size,
+      likedByPseudos: [...likedBy.values()],
     }));
   } catch {
     return [];
@@ -897,19 +1077,22 @@ export async function getFriendsTopGames(
  * Firestore wins when its updatedAt is newer; local wins when local is newer.
  * Call after successful sign-in on a new device.
  */
-export async function syncRatingsFromFirestore(): Promise<void> {
+async function pullRatingsFromFirestore(): Promise<boolean> {
   try {
     const uid = getUid();
+    const pendingDeletionIds = await syncPendingRatingDeletions();
+    if (auth.currentUser?.uid !== uid) return true;
     // Force server read to bypass stale Firestore cache on new devices
     const snap = await getDocsFromServer(collection(db, 'ratings', uid, 'games'));
-    if (snap.empty) return;
+    if (auth.currentUser?.uid !== uid) return true;
 
-    // Build a map of remote ratings keyed by gameId (number)
-    const remoteMap = new Map<number, any>();
+    const invalidIds: number[] = [];
+    const remoteRatings: any[] = [];
     snap.docs.forEach((d) => {
       const data = d.data();
       const gameId = Number(d.id);
-      remoteMap.set(gameId, {
+      if (pendingDeletionIds.has(gameId)) return;
+      const rating = {
         id: gameId,
         name: data.name ?? '',
         background_image: data.background_image ?? '',
@@ -922,40 +1105,37 @@ export async function syncRatingsFromFirestore(): Promise<void> {
         completed: data.completed ?? false,
         comment: data.comment,
         hoursPlayed: data.hoursPlayed,
+        top3XpAwarded: data.top3XpAwarded,
         // updatedAt in ms (for conflict resolution)
         _updatedAt: data.updatedAt?.toMillis?.() ?? 0,
-      });
+        synced: true,
+      };
+      if (hasMeaningfulRating(rating)) remoteRatings.push(rating);
+      else invalidIds.push(gameId);
     });
 
     const localRatings: any[] = (await loadData(USER_KEYS.ratings)) ?? [];
-    const localMap = new Map<number, any>();
-    localRatings.forEach((r) => localMap.set(Number(r.id), r));
-
-    // Merge: for each remote entry, keep the newer version
-    remoteMap.forEach((remote, gameId) => {
-      const local = localMap.get(gameId);
-      const localUpdatedAt = local?._updatedAt ?? local?.updatedAt ?? 0;
-      if (!local || remote._updatedAt > localUpdatedAt) {
-        // Remote is newer — use it (strip internal _updatedAt before saving)
-        // Preserve fields that may be missing in remote but present locally (e.g. hoursPlayed, comment, ratedAt)
-        const { _updatedAt, ...remoteClean } = remote;
-        localMap.set(gameId, {
-          ...remoteClean,
-          hoursPlayed: remoteClean.hoursPlayed ?? local?.hoursPlayed ?? null,
-          comment: remoteClean.comment ?? local?.comment,
-          ratedAt: local?.ratedAt,
-          synced: true,
-        });
-      }
-    });
-
-    const merged = Array.from(localMap.values());
+    if (auth.currentUser?.uid !== uid) return true;
+    const merged = mergeRemoteRatings(localRatings, remoteRatings);
     await saveData(USER_KEYS.ratings, merged);
+    for (const invalidId of invalidIds) await queueRatingDeletion(invalidId);
+    if (invalidIds.length > 0) await syncPendingRatingDeletions();
 
     // Upload any local ratings not yet on Firestore (created offline)
-    const unsynced = merged.filter((r) => !r.synced && r.id && r.general);
+    const unsynced = merged.filter((r) => !r.synced && r.id && hasMeaningfulRating(r));
+    let localChanged = false;
+    let syncFailed = false;
     for (const r of unsynced) {
-      await syncRatingToFirestore({
+      if (auth.currentUser?.uid !== uid) return true;
+      const relatedRemoteGroup = groupGamesByIdentity([r, ...remoteRatings])
+        .find((entries) => entries.includes(r)) ?? [];
+      const obsoleteRemoteIds = Array.from(new Set(
+        relatedRemoteGroup
+          .filter((entry) => entry !== r && String(entry.id) !== String(r.id))
+          .map((entry) => Number(entry.id))
+          .filter(Number.isSafeInteger)
+      ));
+      const synced = await syncRatingToFirestore({
         gameId: r.id,
         gameName: r.name ?? '',
         gameImage: r.background_image ?? '',
@@ -966,30 +1146,49 @@ export async function syncRatingsFromFirestore(): Promise<void> {
         lifespan: r.lifespan ?? 0,
         completed: r.completed ?? false,
         comment: r.comment,
-      }).catch(() => {});
+        hoursPlayed: r.hoursPlayed,
+        top3XpAwarded: r.top3XpAwarded,
+      }).catch(() => false);
+      if (!synced) syncFailed = true;
+      if (synced) {
+        r.synced = true;
+        localChanged = true;
+        for (const obsoleteId of obsoleteRemoteIds) await queueRatingDeletion(obsoleteId);
+        if (obsoleteRemoteIds.length > 0) await syncPendingRatingDeletions();
+      }
     }
+    if (localChanged) await saveData(USER_KEYS.ratings, merged);
+    return !syncFailed;
   } catch (e) {
-    // console.warn('syncRatingsFromFirestore failed:', e);
+    console.warn('[Sync] Ratings sync failed:', e instanceof Error ? e.message : e);
+    return false;
   }
+}
+
+export function syncRatingsFromFirestore(): Promise<boolean> {
+  const run = () => pullRatingsFromFirestore();
+  ratingsCloudSync = ratingsCloudSync.then(run, run);
+  return ratingsCloudSync;
 }
 
 /**
  * Pull profile (pseudo, avatarUri, xp, top3) from Firestore → AsyncStorage.
  * Uses Firestore data when local is missing or Firestore is newer.
  */
-export async function syncProfileFromFirestore(): Promise<void> {
+export async function syncProfileFromFirestore(): Promise<boolean> {
   try {
     const uid = getUid();
     // Force server read to bypass stale Firestore cache
     const snap = await getDocFromServer(doc(db, 'users', uid));
-    if (!snap.exists()) return;
+    if (auth.currentUser?.uid !== uid) return true;
+    if (!snap.exists()) return true;
 
     const remote = snap.data();
     const remoteUpdatedAt: number = remote.updatedAt?.toMillis?.() ?? 0;
 
     const localProfile: any = (await loadData(USER_KEYS.profile)) ?? {};
     const localXp: number = (await loadData(USER_KEYS.xp)) ?? 0;
-    const localTop3: any[] = (await loadData(USER_KEYS.top3)) ?? [];
+    if (auth.currentUser?.uid !== uid) return true;
     const localUpdatedAt: number = localProfile._updatedAt ?? 0;
 
     // Use Firestore if local has no profile OR remote is newer
@@ -1006,44 +1205,90 @@ export async function syncProfileFromFirestore(): Promise<void> {
       await saveData(USER_KEYS.xp, Math.max(remoteXp, localXp));
       // Top3: always restore from Firestore if remote is newer and existe
       if (Array.isArray(remote.top3)) {
-        await saveData(USER_KEYS.top3, remote.top3);
+        await saveData(USER_KEYS.top3, dedupeGamesByIdentity(remote.top3.filter(hasMeaningfulRating)));
       }
     }
+    return true;
   } catch (e) {
-    // console.warn('syncProfileFromFirestore failed:', e);
+    console.warn('[Sync] Profile sync failed:', e instanceof Error ? e.message : e);
+    return false;
   }
 }
 
 /**
  * Save game lists (wishlist/backlog/playing) to Firestore under users/{uid}.lists
  */
-export async function syncListsToFirestore(lists: any[]): Promise<void> {
+async function writeListsToFirestore(lists: any[], expectedUid: string | null): Promise<boolean> {
+  if ((auth.currentUser?.uid ?? null) !== expectedUid) return true;
+  const cleanLists = dedupeGamesByIdentity(lists);
+  const localUpdatedAt = Date.now();
+  // Reassert the exact local snapshot passed by the UI. A queued cloud pull may
+  // otherwise have completed after the UI's optimistic AsyncStorage write.
+  await saveData(USER_KEYS.lists, cleanLists);
+  await saveData(USER_KEYS.listsUpdatedAt, localUpdatedAt);
   try {
     const uid = getUid();
-    await setDoc(doc(db, 'users', uid), { lists }, { merge: true });
+    if (uid !== expectedUid) return true;
+    await setDoc(doc(db, 'users', uid), {
+      lists: cleanLists,
+      listsUpdatedAt: serverTimestamp(),
+    }, { merge: true });
+    return true;
   } catch (e) {
-    // console.warn('syncListsToFirestore failed:', e);
+    console.warn('[Sync] Lists upload failed:', e instanceof Error ? e.message : e);
+    return false;
   }
+}
+
+export function syncListsToFirestore(lists: any[]): Promise<boolean> {
+  const ownerUid = auth.currentUser?.uid ?? null;
+  const run = () => writeListsToFirestore(lists, ownerUid);
+  listsCloudSync = listsCloudSync.then(run, run);
+  return listsCloudSync;
 }
 
 /**
  * Pull game lists from Firestore → AsyncStorage.
- * Only overwrites local if local is empty.
+ * Last-write-wins sync for the complete list, including intentional deletions.
  */
-export async function syncListsFromFirestore(): Promise<void> {
+async function pullListsFromFirestore(): Promise<boolean> {
   try {
     const uid = getUid();
-    const localLists: any[] = (await loadData(USER_KEYS.lists)) ?? [];
-    if (localLists.length > 0) return; // local has data, don't overwrite
-
-    const snap = await getDoc(doc(db, 'users', uid));
-    if (!snap.exists()) return;
-
-    const remoteLists = snap.data()?.lists;
-    if (Array.isArray(remoteLists) && remoteLists.length > 0) {
-      await saveData(USER_KEYS.lists, remoteLists);
+    const [localValue, localTimestamp] = await Promise.all([
+      loadData(USER_KEYS.lists),
+      loadData(USER_KEYS.listsUpdatedAt),
+    ]);
+    const localLists: any[] = Array.isArray(localValue) ? localValue : [];
+    const localUpdatedAt = Number(localTimestamp ?? 0);
+    const snap = await getDocFromServer(doc(db, 'users', uid));
+    if (auth.currentUser?.uid !== uid) return true;
+    if (!snap.exists()) {
+      if (localLists.length > 0 || localUpdatedAt > 0) await writeListsToFirestore(localLists, uid);
+      return true;
     }
+
+    const data = snap.data();
+    const remoteLists = Array.isArray(data.lists) ? dedupeGamesByIdentity(data.lists) : [];
+    const remoteUpdatedAt = Number(data.listsUpdatedAt?.toMillis?.() ?? 0);
+    if (auth.currentUser?.uid !== uid) return true;
+    if (localUpdatedAt === 0 && localLists.length > 0) {
+      // Preserve the pre-migration behavior: existing local data was authoritative.
+      await writeListsToFirestore(localLists, uid);
+    } else if (remoteUpdatedAt > localUpdatedAt || (localUpdatedAt === 0 && localLists.length === 0)) {
+      await saveData(USER_KEYS.lists, remoteLists);
+      await saveData(USER_KEYS.listsUpdatedAt, remoteUpdatedAt);
+    } else if (localUpdatedAt > remoteUpdatedAt) {
+      await writeListsToFirestore(localLists, uid);
+    }
+    return true;
   } catch (e) {
-    // console.warn('syncListsFromFirestore failed:', e);
+    console.warn('[Sync] Lists sync failed:', e instanceof Error ? e.message : e);
+    return false;
   }
+}
+
+export function syncListsFromFirestore(): Promise<boolean> {
+  const run = () => pullListsFromFirestore();
+  listsCloudSync = listsCloudSync.then(run, run);
+  return listsCloudSync;
 }

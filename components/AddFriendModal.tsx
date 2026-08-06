@@ -52,6 +52,8 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
   const [myUid, setMyUid] = useState<string | null>(null);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [canceling, setCanceling] = useState<string | null>(null);
+  const [adding, setAdding] = useState<string | null>(null);
+  const searchRequestRef = useRef(0);
 
   const handleViewProfile = (uid: string) => {
     Keyboard.dismiss();
@@ -77,8 +79,10 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
   });
 
   useEffect(() => {
+    searchRequestRef.current += 1;
     if (visible) {
-      try { setMyUid(getUid()); } catch (_) {}
+      setMyUid(null);
+      try { setMyUid(getUid()); } catch {}
     } else {
       setSearch('');
       setResults([]);
@@ -88,8 +92,10 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
 
   const runSearch = useCallback(
     async (q: string) => {
+      const requestId = ++searchRequestRef.current;
       if (!myUid || q.trim().length < 2) {
         setResults([]);
+        setLoading(false);
         return;
       }
       setLoading(true);
@@ -101,12 +107,12 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
             return { ...u, status };
           })
         );
-        setResults(rows);
-      } catch (e) {
+        if (searchRequestRef.current === requestId) setResults(rows);
+      } catch {
         // console.error('[AddFriend] runSearch error:', e);
-        setResults([]);
+        if (searchRequestRef.current === requestId) setResults([]);
       } finally {
-        setLoading(false);
+        if (searchRequestRef.current === requestId) setLoading(false);
       }
     },
     [myUid]
@@ -121,10 +127,16 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
   }, [search, runSearch]);
 
   const handleAdd = async (uid: string) => {
+    if (adding) return;
+    setAdding(uid);
     try {
       await sendFriendRequest(uid);
       setResults((prev) => prev.map((r) => (r.uid === uid ? { ...r, status: 'sent' } : r)));
-    } catch {}
+    } catch {
+      // Keep the action available so the user can retry after a network error.
+    } finally {
+      setAdding(null);
+    }
   };
 
   const handleCancel = async (uid: string) => {
@@ -132,7 +144,7 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
     try {
       await cancelFriendRequest(uid);
       setResults((prev) => prev.map((r) => (r.uid === uid ? { ...r, status: 'none' } : r)));
-    } catch (e) {
+    } catch {
       // console.error('[AddFriend] handleCancel error:', e);
     } finally {
       setCanceling(null);
@@ -183,8 +195,8 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
             <Text style={[styles.actionBtnText, { color: colors.primary }]}>{t.friendsPending}</Text>
           </View>
         ) : (
-          <TouchableOpacity style={[styles.actionBtn, styles.addBtn]} onPress={() => handleAdd(item.uid)}>
-            <Text style={styles.actionBtnText}>{t.friendsAdd}</Text>
+          <TouchableOpacity style={[styles.actionBtn, styles.addBtn]} onPress={() => handleAdd(item.uid)} disabled={adding === item.uid}>
+            <Text style={styles.actionBtnText}>{adding === item.uid ? '...' : t.friendsAdd}</Text>
           </TouchableOpacity>
         )}
       </TouchableOpacity>
@@ -231,13 +243,13 @@ export default function AddFriendModal({ visible, onClose, onViewProfile }: Prop
                 onPress={() => {
                   if (!myUid) return;
                   Share.share({
-                    message: `Rejoins-moi sur VScore 🎮\nAjoute-moi en ami directement : vscore://invite/${myUid}\n\nTu n'as pas encore VScore ? Télécharge l'app sur l'App Store !`,
-                    title: 'Invitation VScore',
+                    message: t.friendsInviteMessage(myUid),
+                    title: t.friendsInviteTitle,
                   });
                 }}
               >
                 <Ionicons name="share-social-outline" size={18} color={colors.primary} style={{ marginRight: 8 }} />
-                <Text style={styles.inviteBtnText}>Inviter un contact</Text>
+                <Text style={styles.inviteBtnText}>{t.friendsInviteContact}</Text>
               </TouchableOpacity>
               <Text style={styles.hint}>{t.friendsSearchHint}</Text>
             </>

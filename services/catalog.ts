@@ -9,9 +9,10 @@ import {
   fetchFallbackSimilarGames,
   isFallbackGameId,
 } from './freetogame';
-import { apiFetch } from './api';
+import { ApiRequestError, apiFetch } from './api';
 import { db } from './firebase';
-import { gameNameSet, normalizeGameName } from './gameIdentity';
+import { createGameIdentityMatcher, getGameIdentityName, normalizeGameName } from './gameIdentity';
+import { loadData, USER_KEYS } from './storage';
 
 // ─── In-memory response cache (5 min TTL) ────────────────────────────────────
 const _cache = new Map<string, { data: any; ts: number }>();
@@ -19,10 +20,26 @@ const _inFlight = new Map<string, Promise<any>>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const PERSISTENT_LIST_TTL_MS = 6 * 60 * 60 * 1000;
 const PERSISTENT_DETAIL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const PERSISTENT_CACHE_PREFIX = '@ratecade/igdb-cache/v6/';
+const PERSISTENT_CACHE_ROOT = '@ratecade/igdb-cache/';
+const PERSISTENT_CACHE_PREFIX = `${PERSISTENT_CACHE_ROOT}v7/`;
 const PROVIDER_OUTAGE_COOLDOWN_MS = 5 * 60 * 1000;
 let providerUnavailableUntil = 0;
 let fallbackNoticeShown = false;
+let obsoleteCacheCleanup: Promise<void> | null = null;
+
+class CatalogRequestError extends Error {
+  constructor(message: string, public readonly transient: boolean) {
+    super(message);
+    this.name = 'CatalogRequestError';
+  }
+}
+
+function isTransientCatalogError(error: unknown): boolean {
+  if (error instanceof CatalogRequestError) return error.transient;
+  if (!(error instanceof ApiRequestError)) return true;
+  if (error.code === 'network' || error.code === 'timeout' || error.code === 'invalid-response') return true;
+  return error.status === 429 || (error.status != null && error.status >= 500);
+}
 
 function requestLabel(url: string): string {
   try {
@@ -45,9 +62,13 @@ async function fetchJson(url: string): Promise<any> {
     const query = parsed.searchParams.toString();
     return await apiFetch(`/igdb${path}${query ? `?${query}` : ''}`);
   } catch (error) {
-    providerUnavailableUntil = Date.now() + PROVIDER_OUTAGE_COOLDOWN_MS;
-    throw new Error(
-      `IGDB proxy unavailable for ${requestLabel(url)}: ${error instanceof Error ? error.message : String(error)}`
+    const transient = isTransientCatalogError(error);
+    if (transient) {
+      providerUnavailableUntil = Date.now() + PROVIDER_OUTAGE_COOLDOWN_MS;
+    }
+    throw new CatalogRequestError(
+      `IGDB proxy unavailable for ${requestLabel(url)}: ${error instanceof Error ? error.message : String(error)}`,
+      transient,
     );
   }
 }
@@ -66,6 +87,20 @@ async function persistentCacheKey(url: string): Promise<string> {
   return `${PERSISTENT_CACHE_PREFIX}${digest}`;
 }
 
+async function cleanupObsoletePersistentCaches(): Promise<void> {
+  if (!obsoleteCacheCleanup) {
+    obsoleteCacheCleanup = AsyncStorage.getAllKeys()
+      .then((keys) => keys.filter((key) =>
+        key.startsWith(PERSISTENT_CACHE_ROOT) && !key.startsWith(PERSISTENT_CACHE_PREFIX)
+      ))
+      .then(async (keys) => {
+        if (keys.length > 0) await AsyncStorage.multiRemove(keys);
+      })
+      .catch(() => {});
+  }
+  await obsoleteCacheCleanup;
+}
+
 function useFallback(error: unknown): void {
   if (fallbackNoticeShown) return;
   fallbackNoticeShown = true;
@@ -75,15 +110,42 @@ function useFallback(error: unknown): void {
   );
 }
 
-async function communityGameFallback(id: number): Promise<any | null> {
+async function localLegacyGame(id: number): Promise<any | null> {
   try {
-    const snapshot = await getDoc(doc(db, 'game_stats', String(id)));
-    if (!snapshot.exists()) return null;
-    const data = snapshot.data();
+    const [ratings, lists, top3] = await Promise.all([
+      loadData(USER_KEYS.ratings),
+      loadData(USER_KEYS.lists),
+      loadData(USER_KEYS.top3),
+    ]);
+    const entries = [
+      ...(Array.isArray(ratings) ? ratings : []),
+      ...(Array.isArray(lists) ? lists : []),
+      ...(Array.isArray(top3) ? top3 : []),
+    ];
+    const entry = entries.find((candidate: any) => Number(candidate?.id ?? candidate?.gameId) === id);
+    if (!entry) return null;
+    const name = getGameIdentityName(entry);
+    if (!name) return null;
     return {
       id,
-      name: data.name ?? '',
-      background_image: data.background_image ?? '',
+      name,
+      background_image: entry.background_image ?? entry.gameImage ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function communityGameFallback(id: number): Promise<any | null> {
+  try {
+    const local = await localLegacyGame(id);
+    const snapshot = await getDoc(doc(db, 'game_stats', String(id)));
+    const data = snapshot.exists() ? snapshot.data() : null;
+    if (!data && !local) return null;
+    return {
+      id,
+      name: data?.name ?? local?.name ?? '',
+      background_image: data?.background_image ?? local?.background_image ?? '',
       description_raw: '',
       released: null,
       metacritic: null,
@@ -94,8 +156,25 @@ async function communityGameFallback(id: number): Promise<any | null> {
       _fallbackProvider: 'VScore community',
     };
   } catch {
-    return null;
+    const local = await localLegacyGame(id);
+    return local ? {
+      ...local,
+      description_raw: '',
+      released: null,
+      metacritic: null,
+      genres: [],
+      platforms: [],
+      publishers: [],
+      developers: [],
+      _fallbackProvider: 'VScore local data',
+    } : null;
   }
+}
+
+async function fallbackGames(query: Parameters<typeof fetchFallbackGames>[0], error: unknown) {
+  if (!isTransientCatalogError(error) && Date.now() >= providerUnavailableUntil) throw error;
+  useFallback(error);
+  return fetchFallbackGames(query);
 }
 
 async function cachedFetch(url: string): Promise<any> {
@@ -106,6 +185,7 @@ async function cachedFetch(url: string): Promise<any> {
   if (existingRequest) return existingRequest;
 
   const request = (async () => {
+    await cleanupObsoletePersistentCaches();
     const storageKey = await persistentCacheKey(url);
     let stored: { data: any; ts: number } | null = null;
     try {
@@ -149,7 +229,6 @@ export const fetchGames = async (page = 1, search = '', ordering = '-metacritic'
   const effectiveOrdering = search ? '' : ordering;
   const orderingParam = effectiveOrdering ? `&ordering=${effectiveOrdering}` : '';
   const metacriticParam = metacriticOnly ? '&metacritic=1-100' : '';
-  const fallbackRequest = fetchFallbackGames({ page, pageSize, search, ordering }).catch(() => null);
   try {
     const data = await cachedFetch(
       `${GAME_CATALOG_BASE_URL}/games?page_size=${pageSize}&page=${page}${searchParam}${orderingParam}${metacriticParam}`
@@ -159,23 +238,24 @@ export const fetchGames = async (page = 1, search = '', ordering = '-metacritic'
       : (data.results ?? []);
     return { results, nextPage: data.next ? page + 1 : null };
   } catch (error) {
-    useFallback(error);
-    const fallback = await fallbackRequest;
-    if (fallback) return fallback;
-    throw error;
+    return fallbackGames({ page, pageSize, search, ordering }, error);
   }
 };
 
 export async function resolveGamesByNames(names: string[]): Promise<Map<string, any>> {
-  const uniqueNames = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean))).slice(0, 20);
+  const uniqueNames = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
   if (uniqueNames.length === 0) return new Map();
-  const data = await cachedFetch(
-    `${GAME_CATALOG_BASE_URL}/games/resolve?names=${encodeURIComponent(JSON.stringify(uniqueNames))}`
-  );
+  const chunks: string[][] = [];
+  for (let index = 0; index < uniqueNames.length; index += 20) {
+    chunks.push(uniqueNames.slice(index, index + 20));
+  }
+  const responses = await Promise.all(chunks.map((chunk) => cachedFetch(
+    `${GAME_CATALOG_BASE_URL}/games/resolve?names=${encodeURIComponent(JSON.stringify(chunk))}`
+  )));
   const resolved = new Map<string, any>();
-  (data.results ?? []).forEach((entry: any) => {
+  responses.forEach((data) => (data.results ?? []).forEach((entry: any) => {
     if (entry?.game) resolved.set(normalizeGameName(entry.source_name), entry.game);
-  });
+  }));
   return resolved;
 }
 
@@ -195,7 +275,7 @@ export const fetchGameDetail = async (id: number, lang = 'en'): Promise<any> => 
       }
     }
     if (legacyGame) return legacyGame;
-    throw new Error('Legacy RAWG game metadata is no longer available.');
+    throw new Error('Legacy game metadata is no longer available.');
   }
   try {
     return await cachedFetch(`${GAME_CATALOG_BASE_URL}/games/${id}?lang=${lang}`);
@@ -211,22 +291,18 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   // Fetch a larger batch sorted by release date to allow client-side re-scoring
   const batchSize = pageSize * 3;
-  const fallbackRequest = fetchFallbackGames({
-    page,
-    pageSize,
-    dates: `${oneYearAgo},${today}`,
-    ordering: '-released',
-  }).catch(() => null);
   let data: any;
   try {
     data = await cachedFetch(
       `${GAME_CATALOG_BASE_URL}/games?page_size=${batchSize}&page=${page}&dates=${oneYearAgo},${today}&ordering=-released`
     );
   } catch (error) {
-    useFallback(error);
-    const fallback = await fallbackRequest;
-    if (fallback) return fallback;
-    throw error;
+    return fallbackGames({
+      page,
+      pageSize,
+      dates: `${oneYearAgo},${today}`,
+      ordering: '-released',
+    }, error);
   }
   const raw = (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 5);
 
@@ -242,7 +318,6 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
 };
 
 export const fetchGamesByGenre = async (genreSlug: string, page = 1, pageSize = 20) => {
-  const fallbackRequest = fetchFallbackGames({ genreSlug, page, pageSize }).catch(() => null);
   try {
     const data = await cachedFetch(
       `${GAME_CATALOG_BASE_URL}/games?page_size=${pageSize}&page=${page}&genres=${genreSlug}&ordering=-metacritic`
@@ -250,15 +325,11 @@ export const fetchGamesByGenre = async (genreSlug: string, page = 1, pageSize = 
     const results = data.results ?? [];
     return { results, nextPage: data.next ? page + 1 : null };
   } catch (error) {
-    useFallback(error);
-    const fallback = await fallbackRequest;
-    if (fallback) return fallback;
-    throw error;
+    return fallbackGames({ genreSlug, page, pageSize }, error);
   }
 };
 
 export const fetchGamesByTag = async (tagSlug: string, page = 1, pageSize = 20) => {
-  const fallbackRequest = fetchFallbackGames({ tagSlug, page, pageSize }).catch(() => null);
   try {
     const data = await cachedFetch(
       `${GAME_CATALOG_BASE_URL}/games?page_size=${pageSize}&page=${page}&tags=${tagSlug}&ordering=-metacritic`
@@ -266,10 +337,7 @@ export const fetchGamesByTag = async (tagSlug: string, page = 1, pageSize = 20) 
     const results = data.results ?? [];
     return { results, nextPage: data.next ? page + 1 : null };
   } catch (error) {
-    useFallback(error);
-    const fallback = await fallbackRequest;
-    if (fallback) return fallback;
-    throw error;
+    return fallbackGames({ tagSlug, page, pageSize }, error);
   }
 };
 
@@ -329,24 +397,20 @@ export const fetchGamesFiltered = async ({
   if (platformId) url += `&platforms=${platformId}`;
   if (tagSlug) url += `&tags=${tagSlug}`;
   if (dates) url += `&dates=${dates}`;
-  const fallbackRequest = fetchFallbackGames({
-    search,
-    genreSlug,
-    platformId,
-    tagSlug,
-    dates,
-    page,
-    pageSize,
-    ordering,
-  }).catch(() => null);
   try {
     const data = await cachedFetch(url);
     return { results: data.results ?? [], nextPage: data.next ? page + 1 : null };
   } catch (error) {
-    useFallback(error);
-    const fallback = await fallbackRequest;
-    if (fallback) return fallback;
-    throw error;
+    return fallbackGames({
+      search,
+      genreSlug,
+      platformId,
+      tagSlug,
+      dates,
+      page,
+      pageSize,
+      ordering,
+    }, error);
   }
 };
 
@@ -374,10 +438,7 @@ export const fetchRecommendedGames = async (
     return { results: data.results, isPersonalized: false, genreLabel: '' };
   }
 
-  const ratedIds = new Set(ratings.map((r) => r.id));
-  const ratedNames = gameNameSet(ratings);
-  const isAlreadyRated = (game: any) =>
-    ratedIds.has(game.id) || ratedNames.has(normalizeGameName(game.name));
+  const isAlreadyRated = createGameIdentityMatcher(ratings);
 
   // All liked ratings (>= 2.5), sorted by weighted composite score
   const likedRatings = ratings
@@ -402,7 +463,8 @@ export const fetchRecommendedGames = async (
 
   const excludeGenres = new Set(['casual', 'educational', 'family', 'board-games']);
   const genreWeights: Record<string, { weight: number; name: string }> = {};
-  details.filter(Boolean).forEach((d: any, i: number) => {
+  details.forEach((d: any, i: number) => {
+    if (!d) return;
     const score = (topGames[i].general ?? 0) * 2 + (topGames[i].graphics ?? 0) + (topGames[i].gameplay ?? 0);
     (d.genres ?? []).forEach((g: any) => {
       if (!excludeGenres.has(g.slug)) {
@@ -500,10 +562,7 @@ export const fetchRecommendedGames = async (
 export const fetchPersonalizedSuggestions = async (
   ratings: { id: number; general?: number; name?: string }[]
 ): Promise<{ results: any[]; genreLabel: string; seedGameName: string }> => {
-  const ratedIds = new Set(ratings.map((r) => r.id));
-  const ratedNames = gameNameSet(ratings);
-  const isAlreadyRated = (game: any) =>
-    ratedIds.has(game.id) || ratedNames.has(normalizeGameName(game.name));
+  const isAlreadyRated = createGameIdentityMatcher(ratings);
 
   if (ratings.length === 0) {
     const data = await fetchGames(1, '', '-metacritic', true, 20);

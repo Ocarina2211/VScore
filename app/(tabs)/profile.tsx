@@ -4,7 +4,6 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import { collection, doc, getDocFromServer, getDocsFromServer } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Image, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { captureRef } from 'react-native-view-shot';
@@ -15,11 +14,12 @@ import UserProfileModal from '../../components/UserProfileModal';
 import { getNextRank, getRank } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { getReceivedRequests, isPseudoTaken, syncPublicProfile } from '../../services/community';
-import { auth, db } from '../../services/firebase';
+import { getReceivedRequests, isPseudoTaken, syncListsFromFirestore, syncProfileFromFirestore, syncPublicProfile, syncRatingsFromFirestore } from '../../services/community';
+import { auth } from '../../services/firebase';
 import { fetchGames } from '../../services/games';
+import { createGameIdentityMatcher, normalizeGameName } from '../../services/gameIdentity';
 import { getSteamOwnedGames, SteamGame } from '../../services/steam';
-import { loadData, saveData, USER_KEYS } from '../../services/storage';
+import { loadData, removeData, saveData, USER_KEYS } from '../../services/storage';
 
 
 
@@ -51,7 +51,9 @@ export default function ProfileScreen() {
   const [shareCardVisible, setShareCardVisible] = useState(false);
   const [sharingImage, setSharingImage] = useState(false);
   const shareCardRef = useRef<View>(null);
-  const syncInitializedRef = useRef(false);
+  const profileLoadedRef = useRef(false);
+  const restoreRequestRef = useRef(0);
+  const profileSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [steamGames, setSteamGames] = useState<SteamGame[]>([]);
   const [steamExpanded, setSteamExpanded] = useState(false);
   const [steamLoading, setSteamLoading] = useState(false);
@@ -60,84 +62,36 @@ export default function ProfileScreen() {
   // Version hybride : local + Firestore (restauration de l'ancien comportement)
   const loadProfileData = useCallback(async () => {
     try {
-      const [xpLocal, ratingsVal, top3Val, profileVal] = await Promise.all([
+      profileLoadedRef.current = false;
+      const user = auth.currentUser;
+      const expectedUid = user?.uid ?? null;
+      if (user && !user.isAnonymous) {
+        await Promise.all([
+          syncProfileFromFirestore(),
+          syncRatingsFromFirestore(),
+          syncListsFromFirestore(),
+        ]);
+      }
+      if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
+      const [xpLocal, ratingsVal, top3Val, profileVal, lists] = await Promise.all([
         loadData(USER_KEYS.xp),
         loadData(USER_KEYS.ratings),
         loadData(USER_KEYS.top3),
         loadData(USER_KEYS.profile),
+        loadData(USER_KEYS.lists),
       ]);
+      if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
       setXp(xpLocal ?? 0);
       setRatings(Array.isArray(ratingsVal) ? ratingsVal : []);
       setTop3(Array.isArray(top3Val) ? top3Val : []);
-      if (profileVal?.pseudo) setPseudo(profileVal.pseudo);
-      if (profileVal?.avatarUri) setAvatarUri(profileVal.avatarUri);
-      if (profileVal?.lastPseudoChange) setLastPseudoChange(profileVal.lastPseudoChange);
-      const lists = await loadData(USER_KEYS.lists);
+      setPseudo(profileVal?.pseudo ?? 'PSEUDO');
+      setAvatarUri(profileVal?.avatarUri ?? null);
+      setLastPseudoChange(profileVal?.lastPseudoChange ?? null);
       setGameLists(Array.isArray(lists) ? lists : []);
-
-      // Toujours synchroniser Firestore -> local (xp, top3, avatarUri) si Firestore est plus récent
-      const user = auth.currentUser;
-      if (user && !user.isAnonymous) {
-        try {
-          const snap = await getDocFromServer(doc(db, 'users', user.uid));
-          if (snap.exists()) {
-            const data = snap.data();
-            const remoteUpdatedAt = data.updatedAt?.toMillis?.() ?? 0;
-            const localUpdatedAt = profileVal?._updatedAt ?? 0;
-            if (remoteUpdatedAt > localUpdatedAt || !profileVal?.pseudo) {
-              // Merge profile
-              const newProfile = {
-                ...(profileVal ?? {}),
-                pseudo: data.pseudo ?? profileVal?.pseudo ?? 'PSEUDO',
-                avatarUri: data.avatarUri || profileVal?.avatarUri || '',
-                _updatedAt: remoteUpdatedAt,
-              };
-              await saveData(USER_KEYS.profile, newProfile);
-              setPseudo(newProfile.pseudo);
-              setAvatarUri(newProfile.avatarUri);
-              // XP: always take max (never go down)
-              const remoteXp = data.xp ?? 0;
-              const xpToSet = Math.max(remoteXp, xpLocal ?? 0);
-              await saveData(USER_KEYS.xp, xpToSet);
-              setXp(xpToSet);
-              // Top3: toujours restaurer si remote plus récent
-              if (Array.isArray(data.top3)) {
-                await saveData(USER_KEYS.top3, data.top3);
-                setTop3(data.top3);
-              }
-            }
-          }
-        } catch (_) {}
-        try {
-          const ratingsSnap = await getDocsFromServer(collection(db, 'ratings', user.uid, 'games'));
-          if (!ratingsSnap.empty) {
-            const localRatings: any[] = (await loadData(USER_KEYS.ratings)) || [];
-            const serverRatings = ratingsSnap.docs.map((d) => {
-              const data = d.data();
-              const local = localRatings.find((r: any) => r.id === Number(d.id));
-              return {
-                id: Number(d.id),
-                name: data.name ?? '',
-                background_image: data.background_image ?? '',
-                general: data.general ?? 0,
-                graphics: data.graphics ?? 0,
-                gameplay: data.gameplay ?? 0,
-                story: data.story ?? 0,
-                lifespan: data.lifespan ?? 0,
-                avg: data.avg ?? 0,
-                completed: data.completed ?? false,
-                comment: data.comment ?? local?.comment,
-                hoursPlayed: data.hoursPlayed ?? local?.hoursPlayed ?? null,
-                ratedAt: local?.ratedAt,
-                synced: true,
-              };
-            });
-            await saveData(USER_KEYS.ratings, serverRatings);
-            setRatings(serverRatings);
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
+      profileLoadedRef.current = true;
+    } catch (error) {
+      console.warn('[Profile] Failed to load profile data:', error instanceof Error ? error.message : error);
+    }
   }, []);
 
 
@@ -145,13 +99,14 @@ export default function ProfileScreen() {
   const [restoring, setRestoring] = useState(true);
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
+      const requestId = ++restoreRequestRef.current;
+      profileLoadedRef.current = false;
       if (user && !user.isAnonymous) {
         setRestoring(true);
-        import('../../services/community').then(async (mod) => {
-          await mod.restoreAllUserDataFromCloud();
+        (async () => {
           await loadProfileData();
-          setRestoring(false);
-        });
+          if (restoreRequestRef.current === requestId) setRestoring(false);
+        })();
       } else {
         setRestoring(false);
       }
@@ -173,11 +128,15 @@ export default function ProfileScreen() {
           const steamData = await loadData(USER_KEYS.steamId);
           if (steamData?.steamId) {
             setSteamLoading(true);
+            setSteamGames([]);
             try {
               const games = await getSteamOwnedGames(steamData.steamId);
               if (active) setSteamGames(games.sort((a, b) => b.playtime_forever - a.playtime_forever));
             } catch {}
             if (active) setSteamLoading(false);
+          } else {
+            setSteamGames([]);
+            setSteamLoading(false);
           }
         }
       })();
@@ -191,24 +150,12 @@ export default function ProfileScreen() {
 
   // ─── Derived stats (memoized to avoid recomputing on every render) ────────
   const {
-    completedCount, avgScore, criteriaAvgs, criteriaEntries, sortedCriteria,
-    strongestKey, weakestKey, completionRate, ratingBuckets, maxBucket,
+    completedCount, avgScore, ratingBuckets, maxBucket,
   } = useMemo(() => {
     const completedCount = ratings.filter((r) => r.completed).length;
     const avgScore = ratings.length > 0
       ? ratings.reduce((sum, r) => sum + (r.general ?? 0), 0) / ratings.length
       : 0;
-    const criteriaKeys = ['graphics', 'gameplay', 'story', 'lifespan'] as const;
-    const criteriaAvgs = criteriaKeys.reduce((acc, key) => {
-      const values = ratings.map((r) => r[key]).filter((v) => v != null);
-      acc[key] = values.length > 0 ? values.reduce((s: number, v: number) => s + v, 0) / values.length : 0;
-      return acc;
-    }, {} as Record<typeof criteriaKeys[number], number>);
-    const criteriaEntries = Object.entries(criteriaAvgs) as [typeof criteriaKeys[number], number][];
-    const sortedCriteria = [...criteriaEntries].sort(([, a], [, b]) => b - a);
-    const strongestKey = sortedCriteria[0]?.[0];
-    const weakestKey = sortedCriteria[sortedCriteria.length - 1]?.[0];
-    const completionRate = ratings.length > 0 ? Math.round((completedCount / ratings.length) * 100) : 0;
     const ratingBuckets = new Array(5).fill(0);
     ratings.forEach((r) => {
       const score = Math.round(r.general ?? 0);
@@ -216,13 +163,12 @@ export default function ProfileScreen() {
       ratingBuckets[bucket]++;
     });
     const maxBucket = Math.max(...ratingBuckets, 1);
-    return { completedCount, avgScore, criteriaAvgs, criteriaEntries, sortedCriteria, strongestKey, weakestKey, completionRate, ratingBuckets, maxBucket };
+    return { completedCount, avgScore, ratingBuckets, maxBucket };
   }, [ratings]);
-
-  const criteriaColors: Record<string, string> = { graphics: '#9B59B6', gameplay: '#2ECC71', story: '#3498DB', lifespan: '#F39C12' };
   // ─────────────────────────────────────────────────────────────────────────
 
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  const isRatedGame = useMemo(() => createGameIdentityMatcher(ratings), [ratings]);
 
 
 
@@ -248,23 +194,32 @@ export default function ProfileScreen() {
   );
 
   const [pseudoError, setPseudoError] = useState('');
+  const [savingPseudo, setSavingPseudo] = useState(false);
 
   const savePseudo = async () => {
+    if (savingPseudo) return;
     const trimmed = editPseudoValue.trim();
     if (trimmed.length >= 2 && canChangePseudo) {
-      const uid = auth.currentUser?.uid ?? '';
-      const taken = await isPseudoTaken(trimmed, uid);
-      if (taken) {
-        setPseudoError('Ce pseudo est déjà pris.');
+      setSavingPseudo(true);
+      try {
+        const uid = auth.currentUser?.uid ?? '';
+        const taken = await isPseudoTaken(trimmed, uid);
+        if (taken) {
+          setPseudoError(t.profilePseudoTaken);
+          return;
+        }
+        const now = Date.now();
+        setPseudo(trimmed);
+        setLastPseudoChange(now);
+        const profile = (await loadData(USER_KEYS.profile)) || {};
+        await saveData(USER_KEYS.profile, { ...profile, pseudo: trimmed, lastPseudoChange: now, _updatedAt: now });
+        await saveData(USER_KEYS.pseudoLastChanged, now);
+      } catch {
+        setPseudoError(t.commonActionError);
         return;
+      } finally {
+        setSavingPseudo(false);
       }
-      const now = Date.now();
-      setPseudo(trimmed);
-      setLastPseudoChange(now);
-      const profile = (await loadData(USER_KEYS.profile)) || {};
-      await saveData(USER_KEYS.profile, { ...profile, pseudo: trimmed, lastPseudoChange: now });
-      // Immediately sync new pseudo to Firestore
-      syncPublicProfile(trimmed, avatarUri, xp, top3, gameLists).catch(() => {});
     }
     setPseudoError('');
     setPseudoModalVisible(false);
@@ -283,7 +238,7 @@ export default function ProfileScreen() {
       if (Platform.OS === 'web') {
         await Share.share({ message: t.profileShareMessage(pseudo, rank.name, xp) });
       } else {
-        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share your VScore profile' });
+        await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: t.profileShareDialogTitle });
       }
     } catch {
       setSharingImage(false);
@@ -314,34 +269,37 @@ export default function ProfileScreen() {
         finalAvatarUri = `data:image/jpeg;base64,${manipulated.base64}`;
       } catch (e) {
         console.error('[Avatar] resize/encode failed:', e);
-        Alert.alert('Erreur', 'Impossible de traiter la photo. Réessaie.');
+        Alert.alert(t.commonErrorTitle, t.profileAvatarError);
         return;
       }
       setAvatarUri(finalAvatarUri);
       const profile = (await loadData(USER_KEYS.profile)) || {};
-      await saveData(USER_KEYS.profile, { ...profile, avatarUri: finalAvatarUri });
-      await syncPublicProfile(profile?.pseudo ?? pseudo, finalAvatarUri, xp, top3, gameLists);
+      await saveData(USER_KEYS.profile, { ...profile, avatarUri: finalAvatarUri, _updatedAt: Date.now() });
     }
   };
 
-  // Synchronisation automatique Firestore à chaque changement critique
-  // Guard: skip the first render (initial default values would corrupt Firestore)
+  // Synchronisation automatique Firestore à chaque changement critique.
+  // Wait for restoration: intermediate defaults could otherwise erase a real top 3.
   useEffect(() => {
-    if (!syncInitializedRef.current) {
-      syncInitializedRef.current = true;
-      return;
-    }
+    if (!profileLoadedRef.current || restoring) return;
+    const uid = auth.currentUser?.uid;
     const sync = async () => {
-      await syncPublicProfile(
+      if (!uid || auth.currentUser?.uid !== uid) return;
+      const allowXpDecrease = (await loadData(USER_KEYS.profileXpDecreasePending)) === true;
+      const synced = await syncPublicProfile(
         pseudo ?? 'PSEUDO',
         avatarUri ?? null,
         xp ?? 0,
         top3 ?? [],
-        gameLists ?? []
+        { allowXpDecrease }
       );
+      if (!synced) console.warn('[Profile] Public profile sync is pending; local data is preserved.');
+      if (synced && allowXpDecrease) await removeData(USER_KEYS.profileXpDecreasePending);
     };
-    sync();
-  }, [pseudo, avatarUri, xp, top3, gameLists]);
+    profileSyncQueueRef.current = profileSyncQueueRef.current
+      .then(sync)
+      .catch((error) => console.warn('[Profile] Failed to sync public profile:', error));
+  }, [pseudo, avatarUri, xp, top3, restoring]);
 
   if (restoring) {
     return (
@@ -468,9 +426,9 @@ export default function ProfileScreen() {
                 <TouchableOpacity
                   style={[styles.modalBtn, editPseudoValue.trim().length < 2 && styles.modalBtnDisabled]}
                   onPress={savePseudo}
-                  disabled={editPseudoValue.trim().length < 2}
+                  disabled={editPseudoValue.trim().length < 2 || savingPseudo}
                 >
-                  <Text style={styles.modalBtnText}>{t.profileSave}</Text>
+                  <Text style={styles.modalBtnText}>{savingPseudo ? '...' : t.profileSave}</Text>
                 </TouchableOpacity>
               </>
             ) : null}
@@ -630,14 +588,14 @@ export default function ProfileScreen() {
           <TouchableOpacity style={styles.steamHeader} onPress={() => setSteamExpanded(!steamExpanded)} activeOpacity={0.7}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Ionicons name="logo-steam" size={18} color={colors.text} />
-              <Text style={styles.steamTitle}>Steam ({steamGames.filter(g => !ratings.some(r => r.name?.toLowerCase() === g.name?.toLowerCase())).length})</Text>
+              <Text style={styles.steamTitle}>Steam ({steamGames.filter((game) => !isRatedGame(game)).length})</Text>
             </View>
             <Ionicons name={steamExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textSecondary} />
           </TouchableOpacity>
           {steamExpanded && (
             <View style={styles.steamList}>
               {steamGames
-                .filter(g => !ratings.some(r => r.name?.toLowerCase() === g.name?.toLowerCase()))
+                .filter((game) => !isRatedGame(game))
                 .slice(0, 50)
                 .map((game) => (
                   <View key={game.appid} style={styles.steamGameRow}>
@@ -657,14 +615,20 @@ export default function ProfileScreen() {
                       onPress={async () => {
                         try {
                           const { results } = await fetchGames(1, game.name, '', false, 5);
-                          const match = results.find((r: any) => r.name?.toLowerCase() === game.name?.toLowerCase()) || results[0];
+                          const wantedName = normalizeGameName(game.name);
+                          const exactMatches = results.filter((result: any) => normalizeGameName(result.name) === wantedName);
+                          const match = exactMatches.length === 1
+                            ? exactMatches[0]
+                            : exactMatches.length === 0
+                            ? results[0]
+                            : null;
                           if (match) {
                             router.push(`/game/${match.id}` as any);
                           } else {
-                            Alert.alert('', 'Game not found in the IGDB catalog.');
+                            Alert.alert('', t.commonGameNotFound);
                           }
                         } catch {
-                          Alert.alert('', 'Search error.');
+                          Alert.alert('', t.commonSearchError);
                         }
                       }}
                     >
@@ -672,7 +636,7 @@ export default function ProfileScreen() {
                     </TouchableOpacity>
                   </View>
                 ))}
-              {steamLoading && <Text style={styles.steamGameTime}>Loading...</Text>}
+              {steamLoading && <Text style={styles.steamGameTime}>{t.commonLoading}</Text>}
             </View>
           )}
         </View>

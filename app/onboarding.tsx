@@ -52,30 +52,49 @@ export default function OnboardingScreen() {
       shake();
       return;
     }
-    const uid = auth.currentUser?.uid ?? '';
+    const user = auth.currentUser;
+    const uid = user?.uid ?? '';
     setLoading(true);
-    const taken = await isPseudoTaken(trimmed, uid);
-    setLoading(false);
+    let taken = false;
+    try {
+      taken = await isPseudoTaken(trimmed, uid);
+    } catch {
+      setLoading(false);
+      setError(t.commonActionError);
+      shake();
+      return;
+    } finally {
+      setLoading(false);
+    }
     if (taken) {
-      setError('Ce pseudo est déjà pris, choisis-en un autre.');
+      setError(t.profilePseudoTaken);
       shake();
       return;
     }
     Keyboard.dismiss();
     let finalAvatarUri = avatarUri;
-    if (uid && avatarUri && avatarUri.startsWith('file')) {
+    if (uid && !user?.isAnonymous && avatarUri && avatarUri.startsWith('file')) {
       try {
         finalAvatarUri = await uploadAvatarAsync(avatarUri, uid);
-      } catch (e) {
+      } catch {
         // ignore upload error, fallback to local uri
       }
     }
-    await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri: finalAvatarUri });
+    await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri: finalAvatarUri, _updatedAt: Date.now() });
     // Sync to Firestore so profile survives reinstall / new device
-    if (uid) {
+    if (uid && !user?.isAnonymous) {
       try {
-        await setDoc(doc(db, 'users', uid), { pseudo: trimmed, avatarUri: finalAvatarUri ?? null, memberSince: serverTimestamp() }, { merge: true });
-      } catch (_) {}
+        await setDoc(doc(db, 'users', uid), {
+          pseudo: trimmed,
+          pseudoLower: trimmed.toLowerCase(),
+          xp: 0,
+          avatarUri: finalAvatarUri ?? null,
+          memberSince: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+      } catch (error) {
+        console.warn('[Onboarding] Profile cloud sync failed:', error instanceof Error ? error.message : error);
+      }
     }
     router.replace('/(tabs)');
   };

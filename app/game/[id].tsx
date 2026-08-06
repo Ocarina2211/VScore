@@ -7,71 +7,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import SkeletonBox from '../../components/SkeletonBox';
 import { getGameHeroCover } from '../../constants/CustomCovers';
-import { XP_PER_RATING, XP_PER_TOP3 } from '../../constants/Games';
 import { useResolvedLanguage, useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { fetchGameStats, GameStats, syncListsToFirestore, syncPublicProfile, syncRatingToFirestore } from '../../services/community';
+import { fetchGameStats, GameStats, syncListsToFirestore } from '../../services/community';
+import { dedupeGamesByIdentity, findSameGameIndex, withoutSameGame } from '../../services/gameIdentity';
 import { fetchGameDetail, fetchGameScreenshots, fetchGameSteamUrl, fetchSimilarGames } from '../../services/games';
 import { loadData, saveData, USER_KEYS } from '../../services/storage';
-// Synchronise la note, l'xp, le top3 et le profil (local + Firestore)
-async function handleRateAndTop3({
-  ratingPayload,
-  newTop3,
-  pseudo,
-  avatarUri,
-  lists
-}: {
-  ratingPayload: any,
-  newTop3: any[],
-  pseudo: string,
-  avatarUri: string | null,
-  lists: any[]
-}) {
-  // 1. Enregistre la note sur Firestore
-  await syncRatingToFirestore(ratingPayload);
-  // 2. Récupère toutes les notes locales
-  let ratings = (await loadData(USER_KEYS.ratings)) || [];
-  const idx = ratings.findIndex((r: any) => r.id === ratingPayload.gameId);
-  if (idx >= 0) ratings[idx] = { ...ratingPayload, id: ratingPayload.gameId };
-  else ratings.push({ ...ratingPayload, id: ratingPayload.gameId });
-  await saveData(USER_KEYS.ratings, ratings);
-  // 3. Calcule le nouvel XP
-  let xp = (await loadData(USER_KEYS.xp)) || 0;
-  // Ajoute XP pour la note si c'est la première fois
-  if (idx === -1) xp += XP_PER_RATING;
-  // Ajoute XP pour le top3 si le jeu vient d'y être ajouté (uniquement si le jeu n'était pas déjà noté auparavant)
-  const oldTop3 = (await loadData(USER_KEYS.top3)) || [];
-  const wasInTop3 = oldTop3.some((g: any) => g.id === ratingPayload.gameId);
-  const nowInTop3 = newTop3.some((g: any) => g.id === ratingPayload.gameId);
-  if (!wasInTop3 && nowInTop3 && idx === -1) xp += XP_PER_TOP3;
-  await saveData(USER_KEYS.xp, xp);
-  // 4. Met à jour le top3 local
-  await saveData(USER_KEYS.top3, newTop3);
-  // 5. Met à jour le profil local
-  let profile = (await loadData(USER_KEYS.profile)) || {};
-  profile = { ...profile, xp, top3: newTop3, pseudo, avatarUri };
-  await saveData(USER_KEYS.profile, profile);
-  // 6. Sync Firestore profil (TOUS les champs)
-  await syncPublicProfile(pseudo, avatarUri, xp, newTop3, lists);
-  // Après synchro Firestore, restaure tout le profil depuis Firestore (cloud-first)
-  try {
-    const mod = await import('../../services/community');
-    await mod.restoreAllUserDataFromCloud();
-    // Recharge le profil local (pour le setState du composant)
-    if (typeof window !== 'undefined' && window.dispatchEvent) {
-      window.dispatchEvent(new CustomEvent('profile:refresh'));
-    }
-  } catch (e) {
-    // ignore
-  }
-}
-// Exemple d'utilisation : à appeler après une note ou un changement de top3
-// await handleRateAndTop3({
-//   ratingPayload: { ... },
-//   newTop3: [ ... ],
-//   pseudo,
-//   avatarUri
-// });
 import { translateToFrench } from '../../services/translate';
 
 const StarIcon = ({ value, index, starColor, emptyColor }: { value: number; index: number; starColor: string; emptyColor: string }) => {
@@ -110,68 +51,43 @@ export default function GameDetailScreen() {
   const [listStatus, setListStatus] = useState<'wishlist' | 'backlog' | 'playing' | null>(null);
   const [listModalVisible, setListModalVisible] = useState(false);
   const [updatingList, setUpdatingList] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const router = useRouter();
 
   const handleSetList = async (status: 'wishlist' | 'backlog' | 'playing' | null) => {
     if (updatingList) return;
+    const previousStatus = listStatus;
     setUpdatingList(true);
     try {
       const lists: any[] = (await loadData(USER_KEYS.lists)) ?? [];
-      let updatedLists;
+      const existingIndex = findSameGameIndex(lists, game);
+      let updatedLists: any[];
       if (status === null) {
-        updatedLists = lists.filter((l: any) => l.gameId !== Number(id));
-        await saveData(USER_KEYS.lists, updatedLists);
-        syncListsToFirestore(updatedLists).catch(() => {});
+        updatedLists = withoutSameGame(lists, game);
         setListStatus(null);
       } else {
-        const item = { gameId: Number(id), gameName: game?.name ?? '', gameImage: game?.background_image ?? '', metacritic: game?.metacritic, status, addedAt: Date.now() };
-        const idx = lists.findIndex((l: any) => l.gameId === Number(id));
-        if (idx >= 0) lists[idx] = item; else lists.push(item);
-        await saveData(USER_KEYS.lists, lists);
-        syncListsToFirestore(lists).catch(() => {});
-        setListStatus(status);
-        updatedLists = lists;
-      }
-      // --- LOGIQUE TOP 3 & RATING PAR DÉFAUT ---
-      let ratings = (await loadData(USER_KEYS.ratings)) || [];
-      let rating = ratings.find((r: any) => r.id === Number(id));
-      if (!rating) {
-        // Crée un rating minimal si inexistant
-        rating = {
-          id: Number(id),
-          gameId: Number(id),
-          gameName: game?.name ?? '',
-          gameImage: game?.background_image ?? '',
-          general: 0,
-          graphics: 0,
-          gameplay: 0,
-          story: 0,
-          lifespan: 0,
-          avg: 0,
-          completed: false
+        const existing = existingIndex >= 0 ? lists[existingIndex] : null;
+        const item = {
+          ...existing,
+          gameId: game.id,
+          gameName: game.name ?? '',
+          gameImage: game.background_image ?? '',
+          metacritic: game.metacritic,
+          status,
+          addedAt: existing?.addedAt ?? Date.now(),
         };
-        ratings.push(rating);
-        await saveData(USER_KEYS.ratings, ratings);
+        updatedLists = dedupeGamesByIdentity(existingIndex >= 0
+          ? lists.map((entry, index) => index === existingIndex ? item : entry)
+          : [...lists, item]);
+        setListStatus(status);
       }
-      const sorted = [...ratings].sort((a, b) => (b.general ?? 0) - (a.general ?? 0));
-      const newTop3 = sorted.slice(0, 3);
-      // Récupère pseudo/avatar
-      const profile = (await loadData(USER_KEYS.profile)) || {};
-      const pseudo = profile.pseudo || 'PSEUDO';
-      const avatarUri = profile.avatarUri || null;
-      const xp = (await loadData(USER_KEYS.xp)) || 0;
-      // Appelle la logique de synchro complète
-      const listsToSync = (await loadData(USER_KEYS.lists)) ?? [];
-      await handleRateAndTop3({
-        ratingPayload: rating,
-        newTop3,
-        pseudo,
-        avatarUri,
-        lists: listsToSync
-      });
+      await saveData(USER_KEYS.lists, updatedLists);
+      syncListsToFirestore(updatedLists).catch(() => {});
       setListModalVisible(false);
-    } catch (e) {
-      // ignore
+    } catch (error) {
+      setListStatus(previousStatus);
+      console.warn('[Game] Failed to update list:', error instanceof Error ? error.message : error);
     } finally {
       setUpdatingList(false);
     }
@@ -184,26 +100,70 @@ export default function GameDetailScreen() {
   ];
 
   useEffect(() => {
-    fetchGameDetail(Number(id), lang).then(async (data) => {
-      setGame(data);
-      setLoading(false);
-      fetchGameStats(data.id, data.name).then(setCommunityStats);
-      fetchGameScreenshots(data.id).then(setScreenshots);
-      fetchGameSteamUrl(data.id).then(setSteamUrl);
-      fetchSimilarGames(data.id).then(setSimilarGames);
-      if (lang === 'fr' && data?.description_raw) {
-        const desc = await translateToFrench(data.description_raw, data.id);
-        setTranslatedDesc(desc);
-      } else {
-        setTranslatedDesc(null);
+    let active = true;
+    setLoading(true);
+    setLoadError(null);
+    setGame(null);
+    setCommunityStats(null);
+    setScreenshots([]);
+    setSimilarGames([]);
+    setSteamUrl(null);
+    setTranslatedDesc(null);
+
+    (async () => {
+      try {
+        const data = await fetchGameDetail(Number(id), lang);
+        if (!active) return;
+        setGame(data);
+        setLoading(false);
+
+        const lists: any[] = (await loadData(USER_KEYS.lists)) ?? [];
+        const itemIndex = findSameGameIndex(lists, data);
+        const item = itemIndex >= 0 ? lists[itemIndex] : null;
+        if (active) setListStatus(item?.status ?? null);
+
+        // List IDs are safe to migrate: unlike ratings, they have no aggregate
+        // document whose counters would need to be moved atomically.
+        if (item && Number(item.gameId) !== Number(data.id)) {
+          const migrated = dedupeGamesByIdentity(lists.map((entry: any, index: number) => index === itemIndex
+            ? {
+                ...entry,
+                gameId: data.id,
+                gameName: data.name ?? entry.gameName,
+                gameImage: data.background_image ?? entry.gameImage,
+                metacritic: data.metacritic ?? entry.metacritic,
+            }
+            : entry
+          ));
+          await saveData(USER_KEYS.lists, migrated);
+          syncListsToFirestore(migrated).catch(() => {});
+        }
+
+        const [stats, shots, storeUrl, similar, translated] = await Promise.all([
+          fetchGameStats(data.id, data.name),
+          fetchGameScreenshots(data.id),
+          fetchGameSteamUrl(data.id),
+          fetchSimilarGames(data.id),
+          lang === 'fr' && data.description_raw
+            ? translateToFrench(data.description_raw, data.id)
+            : Promise.resolve<string | null>(null),
+        ]);
+        if (!active) return;
+        setCommunityStats(stats);
+        setScreenshots(shots);
+        setSteamUrl(storeUrl);
+        setSimilarGames(similar);
+        setTranslatedDesc(translated);
+      } catch (error) {
+        if (!active) return;
+        console.warn('[Game] Failed to load:', error instanceof Error ? error.message : error);
+        setLoading(false);
+        setLoadError(error instanceof Error ? error.message : t.commonLoadError);
       }
-    });
-    loadData(USER_KEYS.lists).then((lists: any[]) => {
-      if (!lists) return;
-      const item = lists.find((l: any) => l.gameId === Number(id));
-      setListStatus(item?.status ?? null);
-    });
-  }, [id, lang]);
+    })();
+
+    return () => { active = false; };
+  }, [id, lang, loadAttempt, t.commonLoadError]);
 
   if (loading) return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
@@ -242,11 +202,23 @@ export default function GameDetailScreen() {
     </View>
   );
 
+  if (loadError || !game) return (
+    <View style={styles.errorRoot}>
+      <TouchableOpacity style={styles.errorBack} onPress={() => router.back()}>
+        <Ionicons name="chevron-back" size={22} color={colors.text} />
+      </TouchableOpacity>
+      <Ionicons name="cloud-offline-outline" size={44} color={colors.textSecondary} />
+      <Text style={styles.errorText}>{t.commonLoadError}</Text>
+      <TouchableOpacity style={styles.retryButton} onPress={() => setLoadAttempt((attempt) => attempt + 1)}>
+        <Text style={styles.retryButtonText}>{t.commonRetry}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+
   const genres: string[] = (game.genres ?? []).slice(0, 3).map((g: any) => g.name);
   const platforms: string[] = (game.platforms ?? []).slice(0, 5).map((p: any) => p.platform?.name ?? '');
   const developer: string = (game.developers ?? [])[0]?.name ?? '';
   const publisher: string = (game.publishers ?? [])[0]?.name ?? '';
-  const releaseYear: string = game.released ? new Date(game.released).getFullYear().toString() : '';
 
   const formatRelease = (dateStr: string) => {
     if (!dateStr) return '';
@@ -467,6 +439,11 @@ export default function GameDetailScreen() {
 
 const makeStyles = (c: any) => StyleSheet.create({
   root: { flex: 1, backgroundColor: c.background },
+  errorRoot: { flex: 1, backgroundColor: c.background, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 16 },
+  errorBack: { position: 'absolute', top: 56, left: 16, width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: c.backgroundSecondary },
+  errorText: { color: c.textSecondary, fontSize: 15, lineHeight: 21, textAlign: 'center' },
+  retryButton: { backgroundColor: c.primary, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 12 },
+  retryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
   scroll: { flex: 1 },
 
   // Hero

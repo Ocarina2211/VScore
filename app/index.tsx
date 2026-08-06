@@ -3,12 +3,14 @@ import { getLocales } from 'expo-localization';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useEffect, useRef } from 'react';
-import { Animated, Platform, StyleSheet, Text, View } from 'react-native';
+import { Animated, StyleSheet, Text, View } from 'react-native';
 import { Language, TRANSLATIONS } from '../constants/translations';
 import { signInAsGuest } from '../services/auth';
 import { auth } from '../services/firebase';
-import { cancelAllScheduledNotificationsAsync, requestNotificationPermissionsAsync, scheduleNotificationAsync } from '../services/notifications';
+import { consumeInitialNotificationRouteAsync, getNotificationPermissionsAsync, INACTIVITY_REMINDER_DELAY_MS, rescheduleInactivityReminderAsync } from '../services/notifications';
 import { loadData, USER_KEYS } from '../services/storage';
+
+const STARTUP_ANIMATION_MS = 1500;
 
 function resolveNotifLanguage(pref: string | null): Language {
   if (pref === 'fr') return 'fr';
@@ -20,29 +22,24 @@ function resolveNotifLanguage(pref: string | null): Language {
 
 async function scheduleInactivityReminder() {
   try {
-    const { status } = await requestNotificationPermissionsAsync();
+    const enabledPreference = await loadData(USER_KEYS.notificationsEnabled);
+    if (enabledPreference === false) return;
+    const { status } = await getNotificationPermissionsAsync();
     if (status !== 'granted') return;
 
     const lastDateStr = await loadData(USER_KEYS.lastRatingDate);
-    const now = Date.now();
-    const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
-
-    if (!lastDateStr || now - Number(lastDateStr) >= THREE_DAYS) {
-      const lang = resolveNotifLanguage(await AsyncStorage.getItem('vscore_language'));
-      const t = TRANSLATIONS[lang];
-      // Cancel previous reminders then schedule new one
-      await cancelAllScheduledNotificationsAsync();
-      if (Platform.OS !== 'web') {
-        await scheduleNotificationAsync({
-          content: {
-            title: t.notifTitle,
-            body: t.notifBody,
-          },
-          trigger: { seconds: THREE_DAYS / 1000, repeats: false } as any,
-        });
-      }
-    }
-  } catch (_) {}
+    const lastDate = Number(lastDateStr);
+    const elapsed = Number.isFinite(lastDate) && lastDate > 0 ? Date.now() - lastDate : 0;
+    // Keep a recent rating's original deadline. If it is already overdue, give
+    // the user a fresh three-day window after opening the app instead of firing
+    // a reminder while they are actively using it.
+    const delay = elapsed > 0 && elapsed < INACTIVITY_REMINDER_DELAY_MS
+      ? INACTIVITY_REMINDER_DELAY_MS - elapsed
+      : INACTIVITY_REMINDER_DELAY_MS;
+    const lang = resolveNotifLanguage(await AsyncStorage.getItem('vscore_language'));
+    const t = TRANSLATIONS[lang];
+    await rescheduleInactivityReminderAsync(t.notifTitle, t.notifBody, delay);
+  } catch {}
 }
 
 export default function Index() {
@@ -74,12 +71,12 @@ export default function Index() {
     scheduleInactivityReminder();
 
     // XP bar fills
-    setTimeout(() => {
+    const xpTimer = setTimeout(() => {
       Animated.timing(xpWidth, { toValue: 1, duration: 900, useNativeDriver: false }).start();
     }, 700);
 
     // Dots appear
-    setTimeout(() => {
+    const dotsTimer = setTimeout(() => {
       Animated.timing(dotsOpacity, { toValue: 1, duration: 400, useNativeDriver: true }).start();
     }, 500);
 
@@ -88,6 +85,7 @@ export default function Index() {
       Animated.timing(fadeOut, { toValue: 0, duration: 500, useNativeDriver: true }).start(async () => {
         const forceTutorialForTesting = false;
         const tutorialSeen = await loadData(USER_KEYS.tutorialSeen);
+        const notificationRoute = await consumeInitialNotificationRouteAsync();
         if (!tutorialSeen || forceTutorialForTesting) { router.replace('/tutorial'); return; }
         // Wait for Firebase Auth to be ready, then check if user is authenticated (non-anonymous)
         const user = await new Promise<import('firebase/auth').User | null>((resolve) => {
@@ -99,19 +97,27 @@ export default function Index() {
         if (!user) {
           try {
             await signInAsGuest();
-            router.replace('/(tabs)');
+            router.replace((notificationRoute === '/friends' ? '/login' : notificationRoute ?? '/(tabs)') as any);
           } catch {
             router.replace('/login');
           }
           return;
         }
         // Anonymous users can browse games — route them to tabs too
-        router.replace('/(tabs)');
+        router.replace((notificationRoute === '/friends' && user.isAnonymous
+          ? '/login'
+          : notificationRoute ?? '/(tabs)') as any);
       });
-    }, 3000);
+    }, STARTUP_ANIMATION_MS);
 
-    return () => clearTimeout(timer);
-  }, []);
+    return () => {
+      clearTimeout(xpTimer);
+      clearTimeout(dotsTimer);
+      clearTimeout(timer);
+      spinValue.stopAnimation();
+      spinValue2.stopAnimation();
+    };
+  }, [dotsOpacity, fadeOut, logoScale, opacity, router, spinValue, spinValue2, xpWidth]);
 
   const xpBarWidth = xpWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '72%'] });
   const spin = spinValue.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });

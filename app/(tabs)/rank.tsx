@@ -23,100 +23,125 @@ export default function RankScreen() {
   const [isPersonalized, setIsPersonalized] = useState(false);
   const [genreLabel, setGenreLabel] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasSearchedRef = useRef(false);
   const searchIdRef = useRef(0);
-  const prevRatingsCountRef = useRef<number>(-1);
+  const nextPageRef = useRef<number | null>(null);
+  const loadedRatingsSignatureRef = useRef('');
   const router = useRouter();
+
+  const loadDefault = useCallback(async (reset = false, requestId = ++searchIdRef.current) => {
+    if (reset) setLoading(true); else setLoadingMore(true);
+    try {
+      const ratings = (await loadData(USER_KEYS.ratings)) ?? [];
+      if (ratings.length > 0) {
+        // Personalized recommendations — no pagination
+        const { results, isPersonalized: personalized, genreLabel: label } = await fetchRecommendedGames(ratings);
+        if (searchIdRef.current !== requestId) return false;
+        setGames(results);
+        setNextPage(null);
+        nextPageRef.current = null;
+        setIsPersonalized(personalized);
+        setGenreLabel(label);
+        return true;
+      } else {
+        // Fallback: top external-critic scores
+        const page = reset ? 1 : (nextPageRef.current ?? 1);
+        const data = await fetchGames(page, '', '-metacritic', true, 20);
+        if (searchIdRef.current !== requestId) return false;
+        setGames((prev) => reset ? data.results : [...prev, ...data.results]);
+        setNextPage(data.nextPage);
+        nextPageRef.current = data.nextPage;
+        setIsPersonalized(false);
+        return true;
+      }
+    } catch (error) {
+      if (searchIdRef.current === requestId) {
+        console.warn('[Rank] Failed to load recommendations:', error instanceof Error ? error.message : error);
+        if (reset) setGames([]);
+      }
+      return false;
+    } finally {
+      if (searchIdRef.current === requestId) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    }
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      // Only reload if ratings count changed (or first load)
+      let active = true;
+      // Scores and identities both influence recommendations, not only count.
       (async () => {
         const ratings = (await loadData(USER_KEYS.ratings)) ?? [];
-        const count = ratings.length;
-        if (prevRatingsCountRef.current === count && prevRatingsCountRef.current !== -1) return;
-        prevRatingsCountRef.current = count;
-        searchIdRef.current += 1;
+        if (!active) return;
+        const signature = JSON.stringify(ratings.map((rating: any) => [
+          rating.id,
+          rating.general,
+          rating.graphics,
+          rating.gameplay,
+          rating._updatedAt,
+        ]));
+        if (loadedRatingsSignatureRef.current === signature) return;
+        const requestId = ++searchIdRef.current;
         if (debounceRef.current) clearTimeout(debounceRef.current);
         setQuery('');
-        hasSearchedRef.current = false;
-        loadDefault(true);
+        const loaded = await loadDefault(true, requestId);
+        if (active && loaded && searchIdRef.current === requestId) {
+          loadedRatingsSignatureRef.current = signature;
+        }
       })();
-    }, [])
+      return () => {
+        active = false;
+        searchIdRef.current += 1;
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+      };
+    }, [loadDefault])
   );
-
-  const loadDefault = async (reset = false) => {
-    if (reset) setLoading(true); else setLoadingMore(true);
-    const ratings = (await loadData(USER_KEYS.ratings)) ?? [];
-    if (ratings.length > 0) {
-      // Personalized recommendations — no pagination
-      const { results, isPersonalized: personalized, genreLabel: label } = await fetchRecommendedGames(ratings);
-      setGames(results);
-      setNextPage(null);
-      setIsPersonalized(personalized);
-      setGenreLabel(label);
-    } else {
-      // Fallback: top external-critic scores
-      const page = reset ? 1 : (nextPage ?? 1);
-      const data = await fetchGames(page, '', '-metacritic', true, 20);
-      setGames((prev) => reset ? data.results : [...prev, ...data.results]);
-      setNextPage(data.nextPage);
-      setIsPersonalized(false);
-    }
-    setLoading(false);
-    setLoadingMore(false);
-  };
 
   const handleSearch = (text: string) => {
     setQuery(text);
-    if (text.length >= 2) hasSearchedRef.current = true;
+    const requestId = ++searchIdRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (text.length < 2) {
-      loadDefault(true);
+    if (text.trim().length < 2) {
+      loadDefault(true, requestId);
       setSearching(false);
       return;
     }
+    // A superseded default/pagination request intentionally leaves its own
+    // flags untouched; the new search owns the visible loading state now.
+    setLoading(false);
+    setLoadingMore(false);
     setSearching(true);
-    debounceRef.current = setTimeout(() => doSearch(text), 350);
+    debounceRef.current = setTimeout(() => doSearch(text, requestId), 350);
   };
 
-  const doSearch = async (text: string) => {
-    const currentId = searchIdRef.current;
+  const doSearch = async (text: string, currentId: number) => {
     const q = text.trim().toLowerCase();
-    const [byRelevance, byPopularity, byMeta] = await Promise.all([
-      fetchGames(1, text, '', false, 40),
-      fetchGames(1, text, '-added', false, 40),
-      fetchGames(1, text, '-metacritic', false, 40),
-    ]);
-    // Stale result — a reload was triggered while we were fetching
-    if (searchIdRef.current !== currentId) return;
-    const scoreMap = new Map<number, number>();
-    const addScore = (results: any[], weight: number) => {
-      results.forEach((g, i) => {
-        const s = (results.length - i) * weight;
-        scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + s);
+    try {
+      const { results } = await fetchGames(1, q, '', false, 40);
+      // Stale result — a reload was triggered while we were fetching
+      if (searchIdRef.current !== currentId) return;
+      const ranked = [...results].sort((a, b) => {
+        const score = (game: any) => {
+          const name = String(game.name ?? '').toLowerCase();
+          if (name === q) return 3;
+          if (name.startsWith(q)) return 2;
+          if (name.includes(q)) return 1;
+          return 0;
+        };
+        return score(b) - score(a);
       });
-    };
-    addScore(byRelevance.results, 1.5);
-    addScore(byPopularity.results, 1);
-    addScore(byMeta.results, 1.2);
-    const seen = new Set<number>();
-    const merged = [...byRelevance.results, ...byPopularity.results, ...byMeta.results].filter((g) => {
-      if (seen.has(g.id)) return false;
-      seen.add(g.id);
-      return true;
-    });
-    // Client-side prefix/substring boost
-    merged.forEach((g) => {
-      const name = g.name.toLowerCase();
-      if (name === q) scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + 1000);
-      else if (name.startsWith(q)) scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + 500);
-      else if (name.includes(q)) scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + 200);
-    });
-    merged.sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
-    setGames(merged);
-    setNextPage(null);
-    setSearching(false);
+      setGames(ranked);
+      setNextPage(null);
+      nextPageRef.current = null;
+    } catch (error) {
+      if (searchIdRef.current === currentId) {
+        console.warn('[Rank] Search failed:', error instanceof Error ? error.message : error);
+        setGames([]);
+      }
+    } finally {
+      if (searchIdRef.current === currentId) setSearching(false);
+    }
   };
 
   const handleEndReached = () => {
