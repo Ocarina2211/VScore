@@ -11,6 +11,16 @@ type PermissionResult = {
 
 type NotificationModule = typeof import('expo-notifications');
 
+export const INACTIVITY_REMINDER_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
+
+function routeFromNotificationResponse(response: any): string | null {
+  const route = response?.notification?.request?.content?.data?.route;
+  if (typeof route !== 'string') return null;
+  // Negative IDs are valid for the FreeToGame fallback namespace.
+  if (route === '/friends' || /^\/game\/-?[1-9]\d*$/.test(route)) return route;
+  return null;
+}
+
 function canUseNativeNotifications() {
   return Platform.OS !== 'web' && Constants.appOwnership !== 'expo';
 }
@@ -39,6 +49,38 @@ export async function configureNotificationHandler() {
       }),
     });
   } catch {}
+}
+
+/** Return and clear the notification tap that launched the application. */
+export async function consumeInitialNotificationRouteAsync(): Promise<string | null> {
+  const Notifications = await getNotifications();
+  if (!Notifications) return null;
+  try {
+    const response = await Notifications.getLastNotificationResponseAsync();
+    const route = routeFromNotificationResponse(response);
+    if (response) await Notifications.clearLastNotificationResponseAsync();
+    return route;
+  } catch {
+    return null;
+  }
+}
+
+/** Listen for notification taps while the JavaScript application is running. */
+export async function subscribeToNotificationRoutes(
+  listener: (route: string) => boolean | Promise<boolean>
+): Promise<() => void> {
+  const Notifications = await getNotifications();
+  if (!Notifications) return () => {};
+  const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+    const route = routeFromNotificationResponse(response);
+    if (route) {
+      void Promise.resolve(listener(route)).then(async (handled) => {
+        // Keep an unhandled cold-start response available for app/index.tsx.
+        if (handled) await Notifications.clearLastNotificationResponseAsync();
+      }).catch(() => {});
+    }
+  });
+  return () => subscription.remove();
 }
 
 export async function getNotificationPermissionsAsync(): Promise<PermissionResult> {
@@ -87,6 +129,22 @@ export async function scheduleNotificationAsync(request: {
   } catch {
     return null;
   }
+}
+
+/** Replace the single local inactivity reminder without touching remote push tokens. */
+export async function rescheduleInactivityReminderAsync(
+  title: string,
+  body: string,
+  delayMs: number = INACTIVITY_REMINDER_DELAY_MS
+): Promise<void> {
+  await cancelAllScheduledNotificationsAsync();
+  await scheduleNotificationAsync({
+    content: { title, body },
+    trigger: {
+      seconds: Math.max(60, Math.ceil(delayMs / 1000)),
+      repeats: false,
+    },
+  });
 }
 
 async function getExpoPushToken(): Promise<string | null> {

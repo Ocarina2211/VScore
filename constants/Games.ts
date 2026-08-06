@@ -1,4 +1,10 @@
-export const RAWG_BASE_URL = 'https://api.rawg.io/api';
+// Synthetic URL used only to build stable client-side cache keys. Game data is
+// fetched through the authenticated Ratecade Worker, never directly from IGDB.
+export const GAME_CATALOG_BASE_URL = 'https://catalog.ratecade.app/api';
+export const IGDB_GAME_ID_OFFSET = 1_000_000_000;
+
+export const isIgdbGameId = (id: number) =>
+  Number.isSafeInteger(id) && id > IGDB_GAME_ID_OFFSET;
 
 export const XP_PER_RATING = 200;
 export const XP_PER_TOP3 = 300;

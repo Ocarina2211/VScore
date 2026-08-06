@@ -1,10 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
-import { db, functions } from './firebase';
-
+import { db } from './firebase';
+import { apiFetch } from './api';
 const LOCAL_CACHE_PREFIX = 'translate_cache_';
-const translateText = httpsCallable<{ text: string }, { text: string }>(functions, 'translateText');
 
 export async function translateToFrench(text: string, gameId?: number): Promise<string> {
   if (!text) return text;
@@ -33,8 +31,16 @@ export async function translateToFrench(text: string, gameId?: number): Promise<
 
   // 3. Call DeepL API (last resort)
   try {
-    const response = await translateText({ text: truncated });
-    const translated: string = response.data?.text ?? truncated;
+    const data = await apiFetch<any>('/translate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: truncated,
+      }),
+    });
+    const translated: string = data?.translations?.[0]?.text ?? truncated;
 
     // Save to Firestore (shared) and local cache
     if (gameId) {

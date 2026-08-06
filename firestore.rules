@@ -1,0 +1,127 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function validPseudo(data) {
+      return data.pseudo is string
+        && data.pseudo.size() >= 2
+        && data.pseudo.size() <= 24
+        && data.pseudoLower is string
+        && data.pseudoLower.size() >= 2
+        && data.pseudoLower.size() <= 24;
+    }
+
+    function validScore(value) {
+      return value is number && value >= 0 && value <= 10;
+    }
+
+    function validStats(data) {
+      return data.gameId is number
+        && data.count is number && data.count >= 1
+        && data.totalScore is number && data.totalScore >= 0
+        && data.avgScore is number && data.avgScore >= 0 && data.avgScore <= 10
+        && data.totalGeneral is number && data.totalGeneral >= 0
+        && data.totalGraphics is number && data.totalGraphics >= 0
+        && data.totalGameplay is number && data.totalGameplay >= 0
+        && data.totalStory is number && data.totalStory >= 0
+        && data.totalLifespan is number && data.totalLifespan >= 0
+        && data.totalCompleted is number && data.totalCompleted >= 0
+        && data.completedPercent is number
+        && data.completedPercent >= 0 && data.completedPercent <= 100;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+          'pseudo', 'pseudoLower', 'avatarUri', 'xp', 'top3',
+          'lists', 'listsUpdatedAt', 'memberSince', 'updatedAt',
+          'expoPushTokens', 'notificationsEnabled', 'notificationLanguage',
+          'pushTokenUpdatedAt'
+        ])
+        && validPseudo(request.resource.data)
+        && request.resource.data.xp is number
+        && request.resource.data.xp >= 0
+        && request.resource.data.xp <= 100000000;
+      allow delete: if isOwner(uid);
+    }
+
+    match /ratings/{uid}/games/{gameId} {
+      allow read: if signedIn();
+      allow create, update: if isOwner(uid)
+        && validScore(request.resource.data.general)
+        && validScore(request.resource.data.graphics)
+        && validScore(request.resource.data.gameplay)
+        && validScore(request.resource.data.story)
+        && validScore(request.resource.data.lifespan)
+        && request.resource.data.avg is number
+        && request.resource.data.avg >= 0 && request.resource.data.avg <= 10
+        && request.resource.data.name is string
+        && request.resource.data.name.size() <= 200
+        && request.resource.data.background_image is string
+        && request.resource.data.background_image.size() <= 2000;
+      allow delete: if isOwner(uid);
+    }
+
+    match /game_stats/{gameId} {
+      allow read: if signedIn();
+      // The current mobile client updates aggregates in the same transaction
+      // as the owner's rating. These checks limit malformed writes, but full
+      // integrity requires moving this transaction to trusted server code.
+      allow create, update: if signedIn()
+        && validStats(request.resource.data)
+        && request.resource.data.gameId == int(gameId);
+      // A user may remove the aggregate only while removing their own rating
+      // in the same transaction. This prevents arbitrary aggregate deletion.
+      allow delete: if signedIn()
+        && exists(/databases/$(database)/documents/ratings/$(request.auth.uid)/games/$(gameId));
+    }
+
+    match /friend_requests/{requestId} {
+      allow read: if signedIn()
+        && (resource.data.fromUid == request.auth.uid
+          || resource.data.toUid == request.auth.uid);
+      allow create: if signedIn()
+        && requestId == request.auth.uid + '_' + request.resource.data.toUid
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.toUid is string
+        && request.resource.data.toUid != request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update: if signedIn()
+        && resource.data.fromUid == request.resource.data.fromUid
+        && resource.data.toUid == request.resource.data.toUid
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['accepted', 'rejected']
+        && request.auth.uid == resource.data.toUid;
+      allow delete: if signedIn()
+        && (resource.data.fromUid == request.auth.uid
+          || resource.data.toUid == request.auth.uid);
+    }
+
+    match /translations/{gameId} {
+      allow read: if signedIn();
+      // First writer wins: clients cannot overwrite a shared translation.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['fr'])
+        && request.resource.data.fr is string
+        && request.resource.data.fr.size() <= 500;
+      allow update, delete: if false;
+    }
+
+    match /notification_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

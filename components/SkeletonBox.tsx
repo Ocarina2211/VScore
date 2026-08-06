@@ -20,7 +20,7 @@ export default function SkeletonBox({ width, height, borderRadius = 10, style }:
     );
     anim.start();
     return () => anim.stop();
-  }, []);
+  }, [shimmer]);
 
   const translateX = shimmer.interpolate({
     inputRange: [0, 1],

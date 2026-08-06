@@ -1,24 +1,58 @@
-import { Stack } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { Nunito_500Medium, Nunito_700Bold, useFonts } from '@expo-google-fonts/nunito';
 import { useEffect } from 'react';
 import { Platform, StatusBar, StyleSheet, View } from 'react-native';
-import { I18nProvider, useResolvedLanguage } from '../contexts/I18nContext';
+import { I18nProvider, useI18nReady, useResolvedLanguage } from '../contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../contexts/ThemeContext';
-import { syncListsFromFirestore, syncProfileFromFirestore, syncRatingsFromFirestore, syncRatingToFirestore } from '../services/community';
+import { syncListsFromFirestore, syncProfileFromFirestore, syncPublicProfile, syncRatingsFromFirestore } from '../services/community';
 import { auth } from '../services/firebase';
-import { configureNotificationHandler, registerPushTokenAsync } from '../services/notifications';
-import { loadData, saveData, USER_KEYS } from '../services/storage';
+import { dedupeGamesByIdentity, hasMeaningfulRating } from '../services/gameIdentity';
+import { configureNotificationHandler, registerPushTokenAsync, subscribeToNotificationRoutes } from '../services/notifications';
+import { loadData, removeData, saveData, USER_KEYS } from '../services/storage';
 
 SplashScreen.preventAutoHideAsync();
 
-function StackWithTheme() {
-  const { colors, isDark } = useTheme();
+function StackWithTheme({ fontsReady }: { fontsReady: boolean }) {
+  const { colors, isDark, isReady: themeReady } = useTheme();
+  const languageReady = useI18nReady();
   const language = useResolvedLanguage();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (fontsReady && themeReady && languageReady) SplashScreen.hideAsync();
+  }, [fontsReady, themeReady, languageReady]);
 
   useEffect(() => {
     configureNotificationHandler();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe = () => {};
+    subscribeToNotificationRoutes(async (route) => {
+      // The splash screen owns cold-start routing. Handling the same tap here
+      // would let app/index.tsx replace it with the default tabs a moment later.
+      if (pathname === '/') return false;
+      await auth.authStateReady();
+      const user = auth.currentUser;
+      if (!active || !user) return false;
+      if (route === '/friends' && user.isAnonymous) {
+        router.push('/login');
+        return true;
+      }
+      router.push(route as any);
+      return true;
+    }).then((removeListener) => {
+      if (active) unsubscribe = removeListener;
+      else removeListener();
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [pathname, router]);
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user) => {
@@ -35,47 +69,59 @@ function StackWithTheme() {
     // Re-sync ALL ratings to Firestore once auth is ready
     const unsubscribe = auth.onAuthStateChanged(async (user) => {
       unsubscribe();
-      if (!user || user.isAnonymous) return;
       (async () => {
       try {
-        // Always sync profile/XP from Firestore first (critical for new device restore)
-        await syncProfileFromFirestore();
-        await syncListsFromFirestore();
+        const [storedRatings, storedTop3, storedLists] = await Promise.all([
+          loadData(USER_KEYS.ratings),
+          loadData(USER_KEYS.top3),
+          loadData(USER_KEYS.lists),
+        ]);
+        const ratingsBeforeCleanup: any[] = Array.isArray(storedRatings) ? storedRatings : [];
+        const top3BeforeCleanup: any[] = Array.isArray(storedTop3) ? storedTop3 : [];
+        const listsBeforeCleanup: any[] = Array.isArray(storedLists) ? storedLists : [];
+        const cleanRatings = dedupeGamesByIdentity(ratingsBeforeCleanup.filter(hasMeaningfulRating));
+        const cleanTop3 = dedupeGamesByIdentity(top3BeforeCleanup.filter(hasMeaningfulRating));
+        const cleanLists = dedupeGamesByIdentity(listsBeforeCleanup);
+        if (cleanRatings.length !== ratingsBeforeCleanup.length) await saveData(USER_KEYS.ratings, cleanRatings);
+        if (cleanTop3.length !== top3BeforeCleanup.length) await saveData(USER_KEYS.top3, cleanTop3);
+        if (cleanLists.length !== listsBeforeCleanup.length) await saveData(USER_KEYS.lists, cleanLists);
 
-        const ratings: any[] = (await loadData(USER_KEYS.ratings)) ?? [];
-        const toSync = ratings.filter((r) => r.id && r.general);
-        if (toSync.length === 0) {
-          await syncRatingsFromFirestore();
-          return;
+        if (!user || user.isAnonymous) return;
+        // Always sync profile/XP from Firestore first (critical for new device restore)
+        const profileSyncOk = await syncProfileFromFirestore();
+        const listsSyncOk = await syncListsFromFirestore();
+        // Pull/merge first, then upload only genuinely unsynced local entries.
+        // Uploading every local rating before this merge could overwrite a newer
+        // rating made on another device.
+        const ratingsSyncOk = await syncRatingsFromFirestore();
+        if (!profileSyncOk || !listsSyncOk || !ratingsSyncOk) {
+          console.warn('[Sync] Some data could not be synchronized. Local data is preserved and will retry later.');
         }
-        const updatedRatings = [...ratings];
-        for (const r of toSync) {
-          const ok = await syncRatingToFirestore({
-            gameId: r.id,
-            gameName: r.name ?? '',
-            gameImage: r.background_image ?? '',
-            general: r.general ?? 0,
-            graphics: r.graphics ?? 0,
-            gameplay: r.gameplay ?? 0,
-            story: r.story ?? 0,
-            lifespan: r.lifespan ?? 0,
-            completed: r.completed ?? false,
-            comment: r.comment,
-            hoursPlayed: r.hoursPlayed ?? undefined,
-          });
-          if (ok) {
-            const idx = updatedRatings.findIndex((x) => x.id === r.id);
-            if (idx >= 0) updatedRatings[idx] = { ...updatedRatings[idx], synced: true };
+        // Retry a profile/XP update that may have been saved while offline.
+        const [profile, restoredXp, restoredTop3, pendingXpDecrease] = await Promise.all([
+          loadData(USER_KEYS.profile),
+          loadData(USER_KEYS.xp),
+          loadData(USER_KEYS.top3),
+          loadData(USER_KEYS.profileXpDecreasePending),
+        ]);
+        if (profile?.pseudo) {
+          const synced = await syncPublicProfile(
+            profile.pseudo,
+            profile.avatarUri ?? null,
+            Number(restoredXp ?? 0),
+            Array.isArray(restoredTop3) ? restoredTop3 : [],
+            { allowXpDecrease: pendingXpDecrease === true }
+          );
+          if (synced && pendingXpDecrease === true) {
+            await removeData(USER_KEYS.profileXpDecreasePending);
           }
         }
-        await saveData(USER_KEYS.ratings, updatedRatings);
-        // Pull from Firestore to get ratings from other devices
-        await syncRatingsFromFirestore();
-        // Lists already synced above
       } catch {}
     })();
     });
   }, []);
+
+  if (!fontsReady || !themeReady || !languageReady) return null;
 
   const stack = (
     <Stack
@@ -123,16 +169,10 @@ export default function RootLayout() {
     Nunito_700Bold,
   });
 
-  useEffect(() => {
-    if (fontsLoaded || fontError) SplashScreen.hideAsync();
-  }, [fontsLoaded, fontError]);
-
-  if (!fontsLoaded && !fontError) return null;
-
   return (
     <I18nProvider>
       <ThemeProvider>
-        <StackWithTheme />
+        <StackWithTheme fontsReady={fontsLoaded || !!fontError} />
       </ThemeProvider>
     </I18nProvider>
   );

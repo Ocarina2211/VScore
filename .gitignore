@@ -32,7 +32,15 @@ firebase-debug.log
 *.pem
 
 # local env files
+.env
+.env.*
+!.env.example
 .env*.local
+
+# Firebase Admin credentials (never commit service-account JSON)
+serviceAccountKey*.json
+*service-account*.json
+firebase-adminsdk-*.json
 
 # typescript
 *.tsbuildinfo

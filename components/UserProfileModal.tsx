@@ -2,6 +2,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     Image,
     Modal,
     PanResponder,
@@ -26,6 +27,7 @@ import {
     removeFriend,
     sendFriendRequest,
 } from '../services/community';
+import { findSameGameIndex } from '../services/gameIdentity';
 import { loadData, USER_KEYS } from '../services/storage';
 
 interface Props {
@@ -49,6 +51,7 @@ export default function UserProfileModal({ visible, uid, onClose, onStatusChange
   const [comparison, setComparison] = useState<{ commonCount: number; similarity: number } | null>(null);
 
   useEffect(() => {
+    let active = true;
     if (!visible || !uid) {
       setProfile(null);
       setRatings([]);
@@ -58,25 +61,24 @@ export default function UserProfileModal({ visible, uid, onClose, onStatusChange
     setLoading(true);
     Promise.all([
       getUserPublicProfile(uid),
-      getUserPublicRatings(uid).catch(() => []),
+      getUserPublicRatings(uid),
       getRelationStatus(uid).catch(() => 'none' as RelationStatus),
       loadData(USER_KEYS.ratings).catch(() => null),
     ])
       .then(([prof, rats, st, myRatings]) => {
+        if (!active) return;
         setProfile(prof);
         const friendRatings = [...(rats as any[])].sort((a, b) => (b.general ?? 0) - (a.general ?? 0));
         setRatings(friendRatings);
         setStatus(st as RelationStatus);
         // Compute comparison
         if (myRatings && Array.isArray(myRatings) && friendRatings.length > 0) {
-          const myMap = new Map<string, number>();
-          myRatings.forEach((r: any) => {
-            if (r.id && r.general != null) myMap.set(String(r.id), r.general);
-          });
           let totalDiff = 0;
           let commonCount = 0;
           friendRatings.forEach((r: any) => {
-            const myScore = myMap.get(String(r.id));
+            const mineIndex = findSameGameIndex(myRatings, r);
+            const mine = mineIndex >= 0 ? myRatings[mineIndex] : null;
+            const myScore = mine?.general;
             if (myScore != null) {
               totalDiff += Math.abs(myScore - (r.general ?? 0));
               commonCount++;
@@ -94,9 +96,14 @@ export default function UserProfileModal({ visible, uid, onClose, onStatusChange
         }
       })
       .catch(() => {
-        setProfile(null);
+        if (active) setProfile(null);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [visible, uid]);
 
   const handleAction = async () => {
@@ -120,8 +127,11 @@ export default function UserProfileModal({ visible, uid, onClose, onStatusChange
         setStatus('none');
         onStatusChange?.(uid, 'none');
       }
-    } catch {}
-    setActionLoading(false);
+    } catch {
+      Alert.alert(t.commonErrorTitle, t.commonActionError);
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const handleDecline = async () => {
@@ -131,8 +141,11 @@ export default function UserProfileModal({ visible, uid, onClose, onStatusChange
       await declineFriendRequest(uid);
       setStatus('none');
       onStatusChange?.(uid, 'none');
-    } catch {}
-    setActionLoading(false);
+    } catch {
+      Alert.alert(t.commonErrorTitle, t.commonActionError);
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const panResponder = PanResponder.create({

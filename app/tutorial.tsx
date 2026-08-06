@@ -32,6 +32,7 @@ import {
 import { useLanguage, useTranslation } from '../contexts/I18nContext';
 import { useColors } from '../contexts/ThemeContext';
 import { signInAsGuest } from '../services/auth';
+import { isPseudoTaken } from '../services/community';
 import { auth } from '../services/firebase';
 import { saveData, USER_KEYS } from '../services/storage';
 
@@ -148,7 +149,7 @@ function SlideCard({ colors }: { colors: any }) {
             <Image source={require('../assets/images/covers/zeldabotw.jpg')} style={realCardStyles.cover} resizeMode="cover" />
             {/* Gradient overlay */}
             <View style={realCardStyles.gradient} />
-            {/* Metacritic badge — top right */}
+            {/* IGDB external-critic score badge — top right */}
             <View style={[realCardStyles.metaBadge, { borderColor: colors.primaryLight }]}>
               <Text style={realCardStyles.metaText}>98</Text>
             </View>
@@ -174,7 +175,7 @@ function SlideCard({ colors }: { colors: any }) {
                   <Text style={[calloutStyles.badgeText, { color: '#fff' }]}>98</Text>
                 </View>
               </View>
-              <Text style={[calloutStyles.calloutTitle, { color: '#00C853', marginTop: 4 }]}>Metacritic</Text>
+              <Text style={[calloutStyles.calloutTitle, { color: '#00C853', marginTop: 4 }]}>{t.profileSortMeta}</Text>
               <Text style={[calloutStyles.calloutDesc, { color: colors.textSecondary }]}>{t.tutorialCardLegendMeta}</Text>
             </View>
 
@@ -219,6 +220,7 @@ function SlideAccount({ colors, onDone }: { colors: any; onDone: () => void }) {
   const [step, setStep] = useState<'profile' | 'promo'>('profile');
   const [pseudo, setPseudo] = useState('');
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
+  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const promoAnim = useRef(new Animated.Value(0)).current;
@@ -253,7 +255,14 @@ function SlideAccount({ colors, onDone }: { colors: any; onDone: () => void }) {
       if (!auth.currentUser) {
         await signInAsGuest();
       }
-      await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri });
+      const taken = await isPseudoTaken(trimmed, auth.currentUser?.uid ?? '');
+      if (taken) {
+        setLoading(false);
+        setError(t.profilePseudoTaken);
+        shake();
+        return;
+      }
+      await saveData(USER_KEYS.profile, { pseudo: trimmed, avatarUri, _updatedAt: Date.now() });
       await saveData(USER_KEYS.tutorialSeen, true);
       setLoading(false);
       // Animate in the promo splash
@@ -334,12 +343,13 @@ function SlideAccount({ colors, onDone }: { colors: any; onDone: () => void }) {
             placeholder={t.onboardingPlaceholder}
             placeholderTextColor={colors.textSecondary}
             value={pseudo}
-            onChangeText={setPseudo}
+            onChangeText={(value) => { setPseudo(value); setError(''); }}
             autoCapitalize="none"
             returnKeyType="done"
             onSubmitEditing={onFinish}
           />
         </Animated.View>
+        {error ? <Text style={s.errorText}>{error}</Text> : null}
 
         <TouchableOpacity
           style={[s.submitBtn, { backgroundColor: colors.primary, opacity: (pseudo.trim().length < 2 || loading) ? 0.5 : 1 }]}
@@ -376,7 +386,7 @@ export default function TutorialScreen() {
         useNativeDriver: false,
       }).start();
     });
-  }, [currentIndex]);
+  }, [currentIndex, dotsAnim]);
 
   const goNext = () => {
     if (currentIndex < TOTAL_SLIDES - 1) {
@@ -415,7 +425,7 @@ export default function TutorialScreen() {
               if (!auth.currentUser) {
                 await signInAsGuest();
               }
-            } catch (_) {}
+            } catch {}
             router.replace('/(tabs)');
           }}
         >

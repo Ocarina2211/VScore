@@ -1,13 +1,5 @@
-// Steam Web API integration
-// API key: get one free at https://steamcommunity.com/dev/apikey
-
-import { httpsCallable } from 'firebase/functions';
-import { functions } from './firebase';
-
-const steamRequest = httpsCallable<{ operation: string; steamId?: string; vanityName?: string }, any>(
-  functions,
-  'steamRequest'
-);
+// Steam Web API integration through the authenticated VScore Worker.
+import { apiFetch } from './api';
 
 export interface SteamGame {
   appid: number;
@@ -21,9 +13,9 @@ export interface SteamGame {
  * Returns null if not found.
  */
 export async function resolveVanityUrl(vanityName: string): Promise<string | null> {
-  console.log('[Steam] resolveVanityUrl:', vanityName);
-  const response = await steamRequest({ operation: 'resolveVanityUrl', vanityName });
-  return response.data?.steamId ?? null;
+  const json = await apiFetch<any>(`/steam/resolve?vanity=${encodeURIComponent(vanityName)}`);
+  if (json.response?.success === 1) return json.response.steamid;
+  return null;
 }
 
 /**
@@ -34,7 +26,6 @@ export async function resolveVanityUrl(vanityName: string): Promise<string | nul
  */
 export async function parseSteamInput(input: string): Promise<string | null> {
   const trimmed = input.trim();
-  console.log('[Steam] parseSteamInput:', JSON.stringify(trimmed));
 
   // Pure numeric Steam ID (17 digits)
   if (/^\d{17}$/.test(trimmed)) return trimmed;
@@ -52,7 +43,6 @@ export async function parseSteamInput(input: string): Promise<string | null> {
     return resolveVanityUrl(trimmed);
   }
 
-  console.log('[Steam] parseSteamInput: no pattern matched');
   return null;
 }
 
@@ -61,9 +51,10 @@ export async function parseSteamInput(input: string): Promise<string | null> {
  * Returns the player's display name or null.
  */
 export async function getSteamPlayerName(steamId: string): Promise<string | null> {
-  console.log('[Steam] getSteamPlayerName for:', steamId);
-  const response = await steamRequest({ operation: 'getPlayerName', steamId });
-  return response.data?.name ?? null;
+  const json = await apiFetch<any>(`/steam/player?steamId=${encodeURIComponent(steamId)}`);
+  const players = json.response?.players;
+  if (players && players.length > 0) return players[0].personaname;
+  return null;
 }
 
 /**
@@ -71,8 +62,17 @@ export async function getSteamPlayerName(steamId: string): Promise<string | null
  * Requires that the user's game list is public.
  */
 export async function getSteamOwnedGames(steamId: string): Promise<SteamGame[]> {
-  const response = await steamRequest({ operation: 'getOwnedGames', steamId });
-  return response.data?.games ?? [];
+  const json = await apiFetch<any>(`/steam/games?steamId=${encodeURIComponent(steamId)}`);
+  const games = json.response?.games;
+  if (!games) return [];
+  return games.map((g: any) => ({
+    appid: g.appid,
+    name: g.name,
+    playtime_forever: g.playtime_forever ?? 0,
+    img_icon_url: g.img_icon_url
+      ? `https://media.steampowered.com/steamcommunity/public/images/apps/${g.appid}/${g.img_icon_url}.jpg`
+      : '',
+  }));
 }
 
 /**

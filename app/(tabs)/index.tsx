@@ -9,7 +9,8 @@ import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
 import { fetchBatchGameStats, fetchCommunityTopRated } from '../../services/community';
-import { fetchGames, fetchGamesByGenre, fetchGamesByTag, fetchGamesFiltered, fetchRecentGames, fetchRecommendedGames } from '../../services/rawg';
+import { createGameIdentityMatcher, normalizeGameName } from '../../services/gameIdentity';
+import { fetchGames, fetchGamesByGenre, fetchGamesByTag, fetchGamesFiltered, fetchRecentGames, fetchRecommendedGames, resolveGamesByNames } from '../../services/games';
 import { loadData, USER_KEYS } from '../../services/storage';
 
 
@@ -20,6 +21,9 @@ const FILTER_PLATFORMS = [
   { label: 'Xbox', id: 186 },
   { label: 'Switch', id: 7 },
 ];
+
+const RECENT_WINDOW_DAYS = 365;
+const compactSlug = (value: unknown) => String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 type Section = {
   id: string;
@@ -57,7 +61,7 @@ const SECTION_DEFS: SectionDef[] = [
   { id: 'sports',        title: '⚽ Sports',                        genre: 'sports',                  ordering: '-metacritic' },
   { id: 'fighting',      title: '🥊 Fighting',                      genre: 'fighting',                ordering: '-metacritic' },
   { id: 'racing',        title: '🏎️  Racing',                       genre: 'racing',                  ordering: '-metacritic' },
-  { id: 'top_rated',     title: '⭐ Top rated (Metacritic)',         genre: null,                      ordering: '-metacritic' },
+  { id: 'top_rated',     title: '⭐ Top rated by critics',           genre: null,                      ordering: '-metacritic' },
   { id: 'mmo',           title: '👾 MMO & Multiplayer',             genre: 'massively-multiplayer',   ordering: '-metacritic' },
   { id: 'casual',        title: '🎲 Casual & Party Games',          genre: 'casual',                  ordering: '-metacritic' },
   { id: 'arcade',        title: '🕹️  Arcade & Retro',              genre: 'arcade',                  ordering: '-metacritic' },
@@ -75,7 +79,7 @@ function SkeletonCard({ colors }: { colors: any }) {
     );
     anim.start();
     return () => anim.stop();
-  }, []);
+  }, [shimmer]);
   const translateX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-130, 130] });
   return (
     <View style={{ width: 130, height: 180, borderRadius: 14, overflow: 'hidden', backgroundColor: colors.backgroundSecondary, marginRight: 12 }}>
@@ -123,33 +127,39 @@ export default function HomeScreen() {
   const [activeTag, setActiveTag] = useState('');
   const [activeRecent, setActiveRecent] = useState(false);
   const [gameStatsMap, setGameStatsMap] = useState<Record<number, { avg: number; count: number }>>({});
-  const [metacriticCacheMap, setMetacriticCacheMap] = useState<Record<number, number>>({});;
-  const [ratedIds, setRatedIds] = useState<Set<number>>(new Set());
+  const [metacriticCacheMap, setMetacriticCacheMap] = useState<Record<number, number>>({});
+  const [ratedGames, setRatedGames] = useState<any[]>([]);
   const [hideRated, setHideRated] = useState(false);
   const [filteredGamesMap, setFilteredGamesMap] = useState<Record<string, any[]>>({});
   const [filterLoadingMap, setFilterLoadingMap] = useState<Record<string, boolean>>({});
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchRequestRef = useRef(0);
   const loadedRef = useRef<Set<string>>(new Set());
   const nextPageRef = useRef<Record<string, number | null>>({});
   const loadingMoreRef = useRef<Set<string>>(new Set());
-  const recommendedLastCountRef = useRef(-1);
+  const recommendedRatingsSignatureRef = useRef('');
   const filterVersionRef = useRef(0);
   const activeFiltersRef = useRef({ genre: '', platform: 0, tag: '', recent: false });
+  const loadSectionRef = useRef<(def: SectionDef) => void>(() => {});
   const router = useRouter();
 
   useFocusEffect(
     useCallback(() => {
       loadData(USER_KEYS.ratings).then((ratings: any[]) => {
-        const ids = new Set<number>((ratings ?? []).map((r) => r.id));
-        setRatedIds(ids);
-        // Refresh recommended section when ratings count changes
-        const count = (ratings ?? []).length;
-        if (count !== recommendedLastCountRef.current) {
-          recommendedLastCountRef.current = count;
+        setRatedGames(Array.isArray(ratings) ? ratings : []);
+        const signature = JSON.stringify((ratings ?? []).map((rating: any) => [
+          rating.id,
+          rating.general,
+          rating.graphics,
+          rating.gameplay,
+          rating._updatedAt,
+        ]));
+        if (signature !== recommendedRatingsSignatureRef.current || !loadedRef.current.has('recommended')) {
+          recommendedRatingsSignatureRef.current = signature;
           const recoDef = SECTION_DEFS.find((d) => d.id === 'recommended');
           if (recoDef) {
             loadedRef.current.delete('recommended');
-            loadSection(recoDef);
+            loadSectionRef.current(recoDef);
           }
         }
       });
@@ -157,52 +167,52 @@ export default function HomeScreen() {
       const friendsDef = SECTION_DEFS.find((d) => d.id === 'friends_liked');
       if (friendsDef) {
         loadedRef.current.delete('friends_liked');
-        loadSection(friendsDef);
+        loadSectionRef.current(friendsDef);
       }
-      return () => {
-        setQuery('');
-        setSearchResults([]);
-        if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-      };
     }, [])
   );
 
+  // Keep the Discover search state when opening a game. The tab screen stays
+  // mounted in the navigation stack, so clearing it on focus loss would make
+  // the back action return to a blank Discover screen.
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
+
+  const isRatedGame = useMemo(() => createGameIdentityMatcher(ratedGames), [ratedGames]);
+
   const handleSearch = (text: string) => {
     setQuery(text);
+    const requestId = ++searchRequestRef.current;
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    if (text.length < 2) { setSearchResults([]); return; }
-    searchDebounceRef.current = setTimeout(() => doSearch(text), 350);
+    if (text.trim().length < 2) { setSearchResults([]); setSearching(false); return; }
+    searchDebounceRef.current = setTimeout(() => doSearch(text, requestId), 350);
   };
 
-  const doSearch = async (text: string) => {
+  const doSearch = async (text: string, requestId: number) => {
+    const trimmed = text.trim();
+    if (trimmed.length < 2) return;
     setSearching(true);
-    const [byRelevance, byPopularity] = await Promise.all([
-      fetchGames(1, text, ''),
-      fetchGames(1, text, '-added'),
-    ]);
-    const scoreMap = new Map<number, number>();
-    const addScore = (results: any[], weight: number) => {
-      results.forEach((g, i) => {
-        const s = (results.length - i) * weight;
-        scoreMap.set(g.id, (scoreMap.get(g.id) ?? 0) + s);
-      });
-    };
-    addScore(byRelevance.results, 1.5);
-    addScore(byPopularity.results, 1);
-    const seen = new Set<number>();
-    const merged = [...byRelevance.results, ...byPopularity.results].filter((g) => {
-      if (seen.has(g.id)) return false;
-      seen.add(g.id);
-      return true;
-    });
-    merged.sort((a, b) => (scoreMap.get(b.id) ?? 0) - (scoreMap.get(a.id) ?? 0));
-    setSearchResults(merged);
-    setSearching(false);
+    try {
+      const { results } = await fetchGames(1, trimmed, '', false, 40);
+      if (searchRequestRef.current === requestId) setSearchResults(results);
+    } catch (error) {
+      if (searchRequestRef.current === requestId) {
+        console.warn('[Home] Search failed:', error instanceof Error ? error.message : error);
+        setSearchResults([]);
+      }
+    } finally {
+      if (searchRequestRef.current === requestId) setSearching(false);
+    }
   };
 
   const handleClear = () => {
+    searchRequestRef.current += 1;
     setQuery('');
     setSearchResults([]);
+    setSearching(false);
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
   };
 
@@ -220,12 +230,13 @@ export default function HomeScreen() {
   // Called when a section first loads while filters are already active.
   const fetchFilteredForSection = useCallback(async (def: SectionDef) => {
     const { genre, platform, tag, recent } = activeFiltersRef.current;
+    const version = filterVersionRef.current;
     if (!genre && !platform && !tag && !recent) return;
     if (STATIC_SECTIONS.has(def.id)) return;
 
     const today = new Date().toISOString().split('T')[0];
-    const twoYearsAgo = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const dates = recent ? `${twoYearsAgo},${today}` : '';
+    const recentSince = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const dates = recent ? `${recentSince},${today}` : '';
     const genreSlug = def.genre ?? genre;
     const tagSlug = def.tag ?? tag;
 
@@ -240,11 +251,18 @@ export default function HomeScreen() {
         page: 1,
         pageSize: 20,
       });
+      if (version !== filterVersionRef.current) return;
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: data.results }));
+      fetchBatchGameStats(data.results).then((stats) =>
+        setGameStatsMap((prev) => ({ ...prev, ...stats }))
+      );
     } catch {
+      if (version !== filterVersionRef.current) return;
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: [] }));
     } finally {
-      setFilterLoadingMap((prev) => ({ ...prev, [def.id]: false }));
+      if (version === filterVersionRef.current) {
+        setFilterLoadingMap((prev) => ({ ...prev, [def.id]: false }));
+      }
     }
   }, []);
 
@@ -253,16 +271,30 @@ export default function HomeScreen() {
     loadedRef.current.add(def.id);
     updateSection(def.id, { loading: true });
 
+    try {
+
     if (def.id === 'community') {
       const communityGames = await fetchCommunityTopRated(1, 20);
-      const games = communityGames.map((g) => ({ ...g, id: g.gameId }));
+      const resolvedByName = await resolveGamesByNames(communityGames.map((game) => game.name))
+        .catch(() => new Map<string, any>());
+      const games = communityGames.map((communityGame) => {
+        const catalogGame = resolvedByName.get(normalizeGameName(communityGame.name));
+        return catalogGame
+          ? { ...catalogGame, ...communityGame, id: catalogGame.id, background_image: catalogGame.background_image || communityGame.background_image }
+          : { ...communityGame, id: communityGame.gameId };
+      });
+      const communityStats = Object.fromEntries(
+        games.map((game) => [game.id, { avg: game.avgGeneral ?? game.avgScore ?? 0, count: game.count ?? 0 }])
+      );
+      setGameStatsMap((prev) => ({ ...prev, ...communityStats }));
       nextPageRef.current['community'] = null;
       updateSection('community', { games, loading: false });
       return;
     }
 
     if (def.id === 'recommended') {
-      const games = await loadRecommendations();
+      const ratings = (await loadData(USER_KEYS.ratings)) ?? [];
+      const { results: games } = await fetchRecommendedGames(ratings);
       nextPageRef.current['recommended'] = null;
       updateSection('recommended', { games, loading: false });
       return;
@@ -277,7 +309,15 @@ export default function HomeScreen() {
         return;
       }
       const { getFriendsTopGames } = await import('../../services/community');
-      const games = await getFriendsTopGames();
+      const friendGames = await getFriendsTopGames();
+      const resolvedByName = await resolveGamesByNames(friendGames.map((game) => game.name))
+        .catch(() => new Map<string, any>());
+      const games = friendGames.map((friendGame) => {
+        const catalogGame = resolvedByName.get(normalizeGameName(friendGame.name));
+        return catalogGame
+          ? { ...catalogGame, ...friendGame, id: catalogGame.id, background_image: catalogGame.background_image || friendGame.background_image }
+          : friendGame;
+      });
       nextPageRef.current['friends_liked'] = null;
       updateSection('friends_liked', { games, loading: false });
       return;
@@ -291,7 +331,7 @@ export default function HomeScreen() {
       updateSection('trending', { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
       return;
@@ -303,7 +343,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else if (def.tag) {
@@ -312,7 +352,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else if (def.id === 'recent') {
@@ -321,7 +361,7 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     } else {
@@ -330,15 +370,21 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results.map((g: any) => g.id)).then((stats) =>
+      fetchBatchGameStats(data.results).then((stats) =>
         setGameStatsMap((prev) => ({ ...prev, ...stats }))
       );
     }
+    } catch (error) {
+      console.warn(`[Home] Failed to load section ${def.id}:`, error instanceof Error ? error.message : error);
+      loadedRef.current.delete(def.id);
+      updateSection(def.id, { games: [], loading: false, loadingMore: false });
+    }
   }, [updateSection, fetchFilteredForSection, cacheMetacritics]);
+  loadSectionRef.current = loadSection;
 
   useEffect(() => {
     SECTION_DEFS.slice(0, 5).forEach((def) => loadSection(def));
-  }, []);
+  }, [loadSection]);
 
   // Keep activeFiltersRef in sync so fetchFilteredForSection can read current values
   useEffect(() => {
@@ -359,8 +405,8 @@ export default function HomeScreen() {
     const version = filterVersionRef.current;
 
     const today = new Date().toISOString().split('T')[0];
-    const twoYearsAgo = new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const dates = activeRecent ? `${twoYearsAgo},${today}` : '';
+    const recentSince = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const dates = activeRecent ? `${recentSince},${today}` : '';
 
     const loadingInit: Record<string, boolean> = {};
     SECTION_DEFS.forEach((def) => {
@@ -400,7 +446,7 @@ export default function HomeScreen() {
         }
       }
     });
-  }, [activeGenre, activePlatform, activeTag, activeRecent]);
+  }, [activeGenre, activePlatform, activeTag, activeRecent, hasFilters]);
 
   const toggleChip = (type: 'genre' | 'platform' | 'tag' | 'recent', value?: string | number) => {
     if (type === 'genre') setActiveGenre((v) => (v === value ? '' : value as string));
@@ -409,39 +455,63 @@ export default function HomeScreen() {
     else if (type === 'recent') setActiveRecent((v) => !v);
   };
 
-  const loadRecommendations = async (): Promise<any[]> => {
-    const ratings = (await loadData(USER_KEYS.ratings)) ?? [];
-    const { results } = await fetchRecommendedGames(ratings);
-    return results;
-  };
+  const filteredSearchResults = useMemo(() => {
+    if (!hasFilters) return searchResults;
+    const cutoff = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    return searchResults.filter((game: any) => {
+      if (activeGenre) {
+        const matchesGenre = [...(game.genres ?? []), ...(game.tags ?? [])]
+          .some((entry: any) => compactSlug(entry.slug ?? entry.name) === compactSlug(activeGenre));
+        if (!matchesGenre) return false;
+      }
+      if (activeTag && !(game.tags ?? []).some((entry: any) => compactSlug(entry.slug ?? entry.name) === compactSlug(activeTag))) return false;
+      if (activePlatform && !(game.platforms ?? []).some((entry: any) => entry.platform?.id === activePlatform)) return false;
+      if (activeRecent && (!game.released || new Date(game.released) < cutoff)) return false;
+      return true;
+    });
+  }, [searchResults, hasFilters, activeGenre, activePlatform, activeTag, activeRecent]);
 
-  const loadMoreInSection = async (sectionId: string) => {
-    if (loadingMoreRef.current.has(sectionId) || STATIC_SECTIONS.has(sectionId)) return;
+  const visibleSearchResults = useMemo(
+    () => hideRated ? filteredSearchResults.filter((game) => !isRatedGame(game)) : filteredSearchResults,
+    [filteredSearchResults, hideRated, isRatedGame]
+  );
+
+  const loadMoreInSection = useCallback(async (sectionId: string) => {
+    if (hasFilters || loadingMoreRef.current.has(sectionId) || STATIC_SECTIONS.has(sectionId)) return;
     const currentNextPage = nextPageRef.current[sectionId];
     if (!currentNextPage) return;
     loadingMoreRef.current.add(sectionId);
     updateSection(sectionId, { loadingMore: true });
     const def = SECTION_DEFS.find((d) => d.id === sectionId)!;
-    let data: { results: any[]; nextPage: number | null };
-    if (def.genre) {
-      data = await fetchGamesByGenre(def.genre, currentNextPage, 20);
-    } else if (def.tag) {
-      data = await fetchGamesByTag(def.tag, currentNextPage, 20);
-    } else if (def.id === 'recent') {
-      data = await fetchRecentGames(currentNextPage, 20);
-    } else {
-      data = await fetchGames(currentNextPage, '', def.ordering, false, 20);
+    try {
+      let data: { results: any[]; nextPage: number | null };
+      if (def.genre) {
+        data = await fetchGamesByGenre(def.genre, currentNextPage, 20);
+      } else if (def.tag) {
+        data = await fetchGamesByTag(def.tag, currentNextPage, 20);
+      } else if (def.id === 'recent') {
+        data = await fetchRecentGames(currentNextPage, 20);
+      } else {
+        data = await fetchGames(currentNextPage, '', def.ordering, false, 20);
+      }
+      nextPageRef.current[sectionId] = data.nextPage;
+      fetchBatchGameStats(data.results).then((stats) =>
+        setGameStatsMap((prev) => ({ ...prev, ...stats }))
+      );
+      setSections((prev) =>
+        prev.map((s) =>
+          s.id === sectionId
+            ? { ...s, games: [...s.games, ...data.results], loadingMore: false }
+            : s
+        )
+      );
+    } catch (error) {
+      console.warn(`[Home] Failed to load more games for ${sectionId}:`, error instanceof Error ? error.message : error);
+      updateSection(sectionId, { loadingMore: false });
+    } finally {
+      loadingMoreRef.current.delete(sectionId);
     }
-    nextPageRef.current[sectionId] = data.nextPage;
-    loadingMoreRef.current.delete(sectionId);
-    setSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId
-          ? { ...s, games: [...s.games, ...data.results], loadingMore: false }
-          : s
-      )
-    );
-  };
+  }, [hasFilters, updateSection]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
     viewableItems.forEach(({ item }: { item: Section }) => {
@@ -461,9 +531,22 @@ export default function HomeScreen() {
       if (STATIC_SECTIONS.has(section.id)) {
         // Client-side filtering for community/recommended/friends sections
         displayGames = section.games;
+        if (activeGenre) {
+          const wanted = compactSlug(activeGenre);
+          displayGames = displayGames.filter((game: any) =>
+            [...(game.genres ?? []), ...(game.tags ?? [])]
+              .some((entry: any) => compactSlug(entry.slug) === wanted)
+          );
+        }
+        if (activeTag) {
+          const wanted = compactSlug(activeTag);
+          displayGames = displayGames.filter((game: any) =>
+            (game.tags ?? []).some((entry: any) => compactSlug(entry.slug) === wanted)
+          );
+        }
         if (activePlatform) displayGames = displayGames.filter((g: any) => g.platforms?.some((p: any) => p.platform?.id === activePlatform));
         if (activeRecent) {
-          const cutoff = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+          const cutoff = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
           displayGames = displayGames.filter((g: any) => g.released && new Date(g.released) >= cutoff);
         }
       } else {
@@ -473,7 +556,9 @@ export default function HomeScreen() {
       displayGames = section.games;
     }
 
-    if (hideRated) displayGames = displayGames.filter((g: any) => !ratedIds.has(g.id));
+    if (hideRated) {
+      displayGames = displayGames.filter((game: any) => !isRatedGame(game));
+    }
     return (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>{t.sections[section.id] ?? section.title}</Text>
@@ -482,7 +567,7 @@ export default function HomeScreen() {
             {[0, 1, 2, 3].map(i => <SkeletonCard key={i} colors={colors} />)}
           </View>
         ) : displayGames.length === 0 && section.id === 'friends_liked' ? (
-          <Text style={styles.emptyRow}>ajoute des amis pour débloquer cette section</Text>
+          <Text style={styles.emptyRow}>{t.friendsNoGames}</Text>
         ) : displayGames.length === 0 && loadedRef.current.has(section.id) ? (
           <Text style={styles.emptyRow}>{t.noGamesAvailable}</Text>
         ) : displayGames.length === 0 ? (
@@ -506,7 +591,7 @@ export default function HomeScreen() {
                 const vscoreStat = gameStatsMap[item.id];
                 const vscore = vscoreStat?.avg;
                 const meta = item.metacritic ?? metacriticCacheMap[item.id];
-                const isRated = ratedIds.has(item.id);
+                const isRated = isRatedGame(item);
                 const isFriendsSection = section.id === 'friends_liked';
                 return (
                   <PressableCard
@@ -549,14 +634,14 @@ export default function HomeScreen() {
         )}
       </View>
     );
-  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, ratedIds, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap]);
+  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, isRatedGame, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap, loadMoreInSection, router]);
 
   const searchBar = (
     <View style={styles.searchBar}>
       <Ionicons name="search" size={20} color={colors.textSecondary} />
       <TextInput
         style={styles.searchInput}
-          placeholder={t.searchPlaceholder}
+        placeholder={t.searchPlaceholder}
         placeholderTextColor={colors.textSecondary}
         value={query}
         onChangeText={handleSearch}
@@ -651,7 +736,7 @@ export default function HomeScreen() {
             {filterChips}
             <ActivityIndicator color={colors.primary} size="large" style={{ marginTop: 60 }} />
           </>
-        ) : searchResults.length === 0 ? (
+        ) : visibleSearchResults.length === 0 ? (
           <>
             {filterChips}
             <View style={styles.emptyState}>
@@ -663,7 +748,7 @@ export default function HomeScreen() {
         ) : (
           <FlatList
             key="search"
-            data={hideRated ? searchResults.filter((g) => !ratedIds.has(g.id)) : searchResults}
+            data={visibleSearchResults}
             keyExtractor={(item) => item.id.toString()}
             numColumns={2}
             contentContainerStyle={styles.gridList}
@@ -697,10 +782,10 @@ export default function HomeScreen() {
         removeClippedSubviews={false}
         ListHeaderComponent={
           <>
-            {ratedIds.size > 0 && (
+            {ratedGames.length > 0 && (
               <View style={styles.hideRatedRow}>
                 <Text style={styles.hideRatedLabel}>
-                  {ratedIds.size} {ratedIds.size === 1 ? t.ratedBadgeLabel.toLowerCase() : t.profileRatedGames.toLowerCase()}
+                  {ratedGames.length} {ratedGames.length === 1 ? t.ratedBadgeLabel.toLowerCase() : t.profileRatedGames.toLowerCase()}
                 </Text>
                 <TouchableOpacity
                   style={[styles.hideRatedBtn, hideRated && styles.hideRatedBtnActive]}

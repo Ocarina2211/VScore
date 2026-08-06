@@ -13,18 +13,16 @@ import {
     signOut as _firebaseSignOut,
     signInAnonymously as _signInAnonymously,
     createUserWithEmailAndPassword,
-    deleteUser,
     EmailAuthProvider,
     GoogleAuthProvider,
     linkWithCredential,
     OAuthProvider,
-    reauthenticateWithCredential,
     sendPasswordResetEmail,
     signInWithCredential,
     signInWithEmailAndPassword
 } from 'firebase/auth';
-import { deleteDoc, doc } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { httpsCallable } from 'firebase/functions';
+import { auth, functions } from './firebase';
 import { loadData, USER_KEYS } from './storage';
 
 // ─── Provider detection ───────────────────────────────────────────────────────
@@ -132,10 +130,13 @@ export async function signInAsGuest(): Promise<void> {
 // ─── Apple ────────────────────────────────────────────────────────────────────
 
 function generateNonce(length = 32): string {
-  const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) result += charset[Math.floor(Math.random() * charset.length)];
-  return result;
+  // Apple uses this value to bind the Firebase credential to the Sign in with
+  // Apple request, so it must not come from Math.random(). Hex keeps the nonce
+  // portable while preserving 128 bits of cryptographic randomness at length 32.
+  return Array.from(Crypto.getRandomBytes(Math.ceil(length / 2)))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, length);
 }
 
 export async function signInWithApple(): Promise<void> {
@@ -159,48 +160,9 @@ export async function signInWithApple(): Promise<void> {
 
 export async function deleteAccount(): Promise<void> {
   const user = auth.currentUser;
-  if (!user) throw new Error('no_user');
-
-  // Best-effort Firestore cleanup first
-  try {
-    await deleteDoc(doc(db, 'users', user.uid));
-  } catch (_) {}
-
-  // Try deletion — if requires-recent-login, re-auth then retry
-  try {
-    await deleteUser(user);
-  } catch (e: any) {
-    if (e.code !== 'auth/requires-recent-login') throw e;
-
-    // Re-authenticate based on provider
-    const provider = getAuthProvider();
-    if (provider === 'apple') {
-      const rawNonce = generateNonce();
-      const hashedNonce = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, rawNonce);
-      const appleCredential = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
-        nonce: hashedNonce,
-      });
-      const { identityToken } = appleCredential;
-      if (!identityToken) throw new Error('no_identity_token');
-      const credential = new OAuthProvider('apple.com').credential({ idToken: identityToken, rawNonce });
-      await reauthenticateWithCredential(user, credential);
-    } else if (provider === 'google') {
-      const { GoogleSignin } = await import('@react-native-google-signin/google-signin');
-      const userInfo = await GoogleSignin.signIn();
-      const idToken = userInfo.data?.idToken;
-      if (!idToken) throw new Error('no_id_token');
-      const credential = GoogleAuthProvider.credential(idToken);
-      await reauthenticateWithCredential(user, credential);
-    } else if (provider === 'email') {
-      // email re-auth needs password — rethrow so UI can handle it
-      throw e;
-    }
-
-    // Retry deletion after re-auth
-    await deleteUser(user);
-  }
+  if (!user || user.isAnonymous) throw new Error('no_registered_user');
+  const deleteMyAccount = httpsCallable(functions, 'deleteMyAccount');
+  await deleteMyAccount();
+  // The Admin SDK removed the server-side user. Clear the now-invalid local session.
+  await _firebaseSignOut(auth).catch(() => {});
 }

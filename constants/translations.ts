@@ -4,7 +4,6 @@ export type Translations = {
   // Tabs
   tabHome: string;
   tabRank: string;
-  tabSearch: string;
   tabProfile: string;
   tabSettings: string;
   discoverTitle: string;
@@ -94,6 +93,7 @@ export type Translations = {
   settingsActivityReminders: string;
   settingsNotRatedSub: string;
   settingsAbout: string;
+  settingsDataProvider: string;
   settingsStoredLocally: string;
   settingsPermissionRequired: string;
   settingsEnableNotifDesc: string;
@@ -116,9 +116,12 @@ export type Translations = {
   profileChangeUsernameOnce: string;
   profileChangeUsernameIn: (days: number) => string;
   profileNewUsername: string;
+  profileAvatarError: string;
+  profilePseudoTaken: string;
   profileSave: string;
   profileClose: string;
   profileShareMessage: (pseudo: string, rank: string, xp: number) => string;
+  profileShareDialogTitle: string;
   profileMaxRank: string;
   profileRatedGames: string;
   profileCompleted: string;
@@ -198,6 +201,20 @@ export type Translations = {
   friendsCompareNoCommon: string;
   friendsCompareSection: string;
   friendsMemberSince: string;
+  friendsInviteContact: string;
+  friendsInviteTitle: string;
+  friendsInviteMessage: (uid: string) => string;
+  inviteNotFound: string;
+  inviteBackHome: string;
+  inviteSubtitle: string;
+  inviteLoginHint: string;
+  inviteLogin: string;
+  inviteOwnLink: string;
+  inviteSent: string;
+  inviteAlreadyFriends: string;
+  inviteAdd: string;
+  inviteHome: string;
+  inviteSendError: string;
 
   // Search / common
   searchPlaceholder: string;
@@ -208,6 +225,15 @@ export type Translations = {
   noGameForFilters: string;
   filterSectionLabel: string;
   clearAll: string;
+  commonLoadError: string;
+  commonRetry: string;
+  commonErrorTitle: string;
+  commonActionError: string;
+  commonCancel: string;
+  commonLoading: string;
+  commonSearchError: string;
+  commonGameNotFound: string;
+  friendsNoGames: string;
 
   // Genre / tag filter labels
   filterAction: string;
@@ -258,6 +284,9 @@ export type Translations = {
   rankSaveChanges: string;
   rankReplaceWith: string;
   rankCancel: string;
+  rankRemoveTitle: string;
+  rankRemoveMessage: (game: string, ratingXp: number, top3Xp: number, losesTop3: boolean) => string;
+  rankRemoveButton: string;
   rankReviewLabel: string;
   rankReviewPlaceholder: string;
   rankCompletedLabel: string;
@@ -306,7 +335,6 @@ const en: Translations = {
   // Tabs
   tabHome: 'Home',
   tabRank: 'Rate',
-  tabSearch: 'Search',
   tabProfile: 'Profile',
   tabSettings: 'Settings',
   discoverTitle: 'Discover',
@@ -396,6 +424,7 @@ const en: Translations = {
   settingsActivityReminders: 'Activity reminders',
   settingsNotRatedSub: "If you haven't rated in 3 days",
   settingsAbout: 'About',
+  settingsDataProvider: 'Game data provided by IGDB.com',
   settingsStoredLocally: 'Stored locally',
   settingsPermissionRequired: 'Permission required',
   settingsEnableNotifDesc: 'Enable notifications in your phone settings to receive reminders.',
@@ -418,9 +447,12 @@ const en: Translations = {
   profileChangeUsernameOnce: 'You can change your username once every 30 days.',
   profileChangeUsernameIn: (days) => `You can change your username in ${days} day${days > 1 ? 's' : ''}.`,
   profileNewUsername: 'New username...',
+  profileAvatarError: 'Unable to process the photo. Try again.',
+  profilePseudoTaken: 'This username is already taken.',
   profileSave: 'Save',
   profileClose: 'Close',
   profileShareMessage: (pseudo, rank, xp) => `Check out my VScore profile! I'm ${pseudo}, rank ${rank} with ${xp} XP 🎮`,
+  profileShareDialogTitle: 'Share your VScore profile',
   profileMaxRank: 'Max rank reached!',
   profileRatedGames: 'Rated games',
   profileCompleted: 'Completed',
@@ -436,7 +468,7 @@ const en: Translations = {
   profileSearchRated: 'Search a rated game...',
   profileSortDate: 'Recent',
   profileSortScore: 'My score',
-  profileSortMeta: 'Metacritic',
+  profileSortMeta: 'Critic score',
   profileSortTitle: 'A → Z',
   profileNoRatings: 'No games rated yet',
   profileNoResultsFor: (query) => `No results for "${query}"`,
@@ -500,6 +532,20 @@ const en: Translations = {
   friendsCompareNoCommon: 'No games in common yet.',
   friendsCompareSection: 'Comparison',
   friendsMemberSince: 'Member since',
+  friendsInviteContact: 'Invite a contact',
+  friendsInviteTitle: 'VScore invitation',
+  friendsInviteMessage: (uid) => `Join me on VScore 🎮\nAdd me as a friend directly: vscore://invite/${uid}\n\nYou don't have VScore yet? Download the app from the App Store!`,
+  inviteNotFound: 'User not found.',
+  inviteBackHome: 'Back home',
+  inviteSubtitle: 'invites you to join VScore',
+  inviteLoginHint: 'Log in to add this user as a friend.',
+  inviteLogin: 'Log in',
+  inviteOwnLink: "That's your own invitation link 😄",
+  inviteSent: 'Request sent!',
+  inviteAlreadyFriends: 'You are already friends.',
+  inviteAdd: 'Add as friend',
+  inviteHome: 'Go to VScore',
+  inviteSendError: 'Unable to send the request. Check your connection and try again.',
 
   // Search / common
   searchPlaceholder: 'Search a game...',
@@ -510,6 +556,15 @@ const en: Translations = {
   noGameForFilters: 'No game found with these filters',
   filterSectionLabel: 'Filters',
   clearAll: 'Clear all ✕',
+  commonLoadError: 'Unable to load this game. Check your connection and try again.',
+  commonRetry: 'Try again',
+  commonErrorTitle: 'Error',
+  commonActionError: 'Something went wrong. Check your connection and try again.',
+  commonCancel: 'Cancel',
+  commonLoading: 'Loading...',
+  commonSearchError: 'Search error.',
+  commonGameNotFound: 'Game not found in the catalog.',
+  friendsNoGames: 'Add friends to unlock this section',
 
   // Genre / tag filter labels
   filterAction: 'Action',
@@ -529,7 +584,7 @@ const en: Translations = {
   sections: {
     popular:     '🔥 Most popular',
     trending:    '🌟 Trending this month',
-    top_rated:   '⭐ Top rated (Metacritic)',
+    top_rated:   '⭐ Top rated by critics',
     community:   '👥 VScore community top',
     recommended: '🎯 Recommended for you',
     friends_liked: '❤️  Your friends love these',
@@ -586,6 +641,9 @@ const en: Translations = {
   rankSaveChanges: '✓  Save changes',
   rankReplaceWith: 'Which game to replace with',
   rankCancel: 'Cancel',
+  rankRemoveTitle: 'Remove this rating',
+  rankRemoveMessage: (game, ratingXp, top3Xp, losesTop3) => `Delete your rating for "${game}"? You will lose ${ratingXp} XP${losesTop3 ? ` + ${top3Xp} XP (Top 3)` : ''}.`,
+  rankRemoveButton: 'Remove',
   rankReviewLabel: 'Your review (optional)',
   rankReviewPlaceholder: 'Share your thoughts about this game...',
   rankCompletedLabel: 'I have completed this game',
@@ -634,7 +692,6 @@ const fr: Translations = {
   // Tabs
   tabHome: 'Accueil',
   tabRank: 'Noter',
-  tabSearch: 'Recherche',
   tabProfile: 'Profil',
   tabSettings: 'Réglages',
   discoverTitle: 'Découvrir',
@@ -724,6 +781,7 @@ const fr: Translations = {
   settingsActivityReminders: "Rappels d'activité",
   settingsNotRatedSub: "Si tu n'as pas noté depuis 3 jours",
   settingsAbout: 'À propos',
+  settingsDataProvider: 'Données des jeux fournies par IGDB.com',
   settingsStoredLocally: 'Stockées localement',
   settingsPermissionRequired: 'Permissions requises',
   settingsEnableNotifDesc: "Active les notifications dans les réglages de ton téléphone pour recevoir des rappels.",
@@ -746,9 +804,12 @@ const fr: Translations = {
   profileChangeUsernameOnce: 'Tu peux modifier ton pseudo une fois tous les 30 jours.',
   profileChangeUsernameIn: (days) => `Tu pourras changer de pseudo dans ${days} jour${days > 1 ? 's' : ''}.`,
   profileNewUsername: 'Nouveau pseudo...',
+  profileAvatarError: 'Impossible de traiter la photo. Réessaie.',
+  profilePseudoTaken: 'Ce pseudo est déjà pris.',
   profileSave: 'Enregistrer',
   profileClose: 'Fermer',
   profileShareMessage: (pseudo, rank, xp) => `Viens voir mon profil VScore ! Je suis ${pseudo}, rang ${rank} avec ${xp} XP 🎮`,
+  profileShareDialogTitle: 'Partager ton profil VScore',
   profileMaxRank: 'Rang max atteint !',
   profileRatedGames: 'Jeux notés',
   profileCompleted: 'Terminés',
@@ -763,7 +824,7 @@ const fr: Translations = {
   profileSearchRated: 'Rechercher un jeu noté...',
   profileSortDate: 'Récent',
   profileSortScore: 'Ma note',
-  profileSortMeta: 'Metacritic',
+  profileSortMeta: 'Score critiques',
   profileSortTitle: 'A → Z',
   profileNoRatings: "Aucun jeu noté pour l'instant",
   profileNoResultsFor: (query) => `Aucun résultat pour "${query}"`,
@@ -828,6 +889,20 @@ const fr: Translations = {
   friendsCompareNoCommon: 'Aucun jeu en commun pour l\'instant.',
   friendsCompareSection: 'Comparaison',
   friendsMemberSince: 'Membre depuis',
+  friendsInviteContact: 'Inviter un contact',
+  friendsInviteTitle: 'Invitation VScore',
+  friendsInviteMessage: (uid) => `Rejoins-moi sur VScore 🎮\nAjoute-moi en ami directement : vscore://invite/${uid}\n\nTu n'as pas encore VScore ? Télécharge l'app sur l'App Store !`,
+  inviteNotFound: 'Utilisateur introuvable.',
+  inviteBackHome: 'Retour à l\'accueil',
+  inviteSubtitle: 't\'invite à le rejoindre sur VScore',
+  inviteLoginHint: 'Connecte-toi pour ajouter cet utilisateur en ami.',
+  inviteLogin: 'Se connecter',
+  inviteOwnLink: 'C\'est ton propre lien d\'invitation 😄',
+  inviteSent: 'Demande envoyée !',
+  inviteAlreadyFriends: 'Vous êtes déjà amis.',
+  inviteAdd: 'Ajouter en ami',
+  inviteHome: 'Aller sur VScore',
+  inviteSendError: 'Impossible d\'envoyer la demande. Vérifie ta connexion puis réessaie.',
 
   // Search / common
   searchPlaceholder: 'Recherche un jeu...',
@@ -838,6 +913,15 @@ const fr: Translations = {
   noGameForFilters: 'Aucun jeu trouvé avec ces filtres',
   filterSectionLabel: 'Filtres',
   clearAll: 'Tout effacer ✕',
+  commonLoadError: 'Impossible de charger ce jeu. Vérifie ta connexion puis réessaie.',
+  commonRetry: 'Réessayer',
+  commonErrorTitle: 'Erreur',
+  commonActionError: 'Une erreur est survenue. Vérifie ta connexion puis réessaie.',
+  commonCancel: 'Annuler',
+  commonLoading: 'Chargement...',
+  commonSearchError: 'Erreur de recherche.',
+  commonGameNotFound: 'Jeu introuvable dans le catalogue.',
+  friendsNoGames: 'Ajoute des amis pour débloquer cette section',
 
   // Genre / tag filter labels
   filterAction: 'Action',
@@ -857,7 +941,7 @@ const fr: Translations = {
   sections: {
     popular:     '🔥 Les plus populaires',
     trending:    '🌟 Tendances du moment',
-    top_rated:   '⭐ Les mieux notés (Metacritic)',
+    top_rated:   '⭐ Les mieux notés par la critique',
     community:   '👥 Top VScore communauté',
     recommended: '🎯 Recommandés pour toi',
     friends_liked: '❤️  Tes amis aiment ces titres',
@@ -914,6 +998,9 @@ const fr: Translations = {
   rankSaveChanges: '✓  Valider les modifications',
   rankReplaceWith: 'Quel jeu remplacer par',
   rankCancel: 'Annuler',
+  rankRemoveTitle: 'Retirer cette note',
+  rankRemoveMessage: (game, ratingXp, top3Xp, losesTop3) => `Supprimer ta note pour "${game}" ? Tu perdras ${ratingXp} XP${losesTop3 ? ` + ${top3Xp} XP (Top 3)` : ''}.`,
+  rankRemoveButton: 'Retirer',
   rankReviewLabel: 'Ta critique (facultatif)',
   rankReviewPlaceholder: 'Partage ton avis sur ce jeu...',
   rankCompletedLabel: 'J\'ai terminé ce jeu',

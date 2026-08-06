@@ -15,6 +15,7 @@ import UserProfileModal from '../components/UserProfileModal';
 import { getRank } from '../constants/Games';
 import { useTranslation } from '../contexts/I18nContext';
 import { useColors } from '../contexts/ThemeContext';
+import { auth } from '../services/firebase';
 import {
     acceptFriendRequest,
     cancelFriendRequest,
@@ -55,12 +56,18 @@ export default function FriendsScreen() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
+  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
 
   const lastLoadRef = useRef(0);
+  const loadRequestRef = useRef(0);
 
   const loadAll = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
+    const ownerUid = auth.currentUser?.uid ?? null;
     setLoading(true);
+    setLoadError(false);
     try {
       const [f, s, r, lb, fd] = await Promise.all([
         getFriends(),
@@ -69,24 +76,30 @@ export default function FriendsScreen() {
         getGlobalLeaderboard(),
         getFriendsFeed(),
       ]);
-      setFriends(f);
-      setSent(s);
-      setReceived(r);
-      setLeaderboard(lb);
-      setFeed(fd);
-      lastLoadRef.current = Date.now();
-    } catch (e) {
-      // console.warn('friends loadAll failed:', e);
+      if (loadRequestRef.current === requestId && auth.currentUser?.uid === ownerUid) {
+        setFriends(f);
+        setSent(s);
+        setReceived(r);
+        setLeaderboard(lb);
+        setFeed(fd);
+        lastLoadRef.current = Date.now();
+      }
+    } catch {
+      if (loadRequestRef.current === requestId) setLoadError(true);
+    } finally {
+      if (loadRequestRef.current === requestId) setLoading(false);
     }
-    setLoading(false);
   }, []);
 
   useFocusEffect(
     useCallback(() => {
       // Re-fetch at most once every 2 minutes; pull-to-refresh bypasses this
       if (Date.now() - lastLoadRef.current > 2 * 60 * 1000) {
-        loadAll();
+        void loadAll();
       }
+      return () => {
+        loadRequestRef.current += 1;
+      };
     }, [loadAll])
   );
 
@@ -98,34 +111,57 @@ export default function FriendsScreen() {
 
   const handleRemoveFriend = async (req: FriendRequest) => {
     const friendUid = req.profile?.uid ?? '';
-    if (!friendUid) return;
+    if (!friendUid || actionRequestId) return;
+    setActionRequestId(req.id);
     try {
       await removeFriend(friendUid);
       setFriends((prev) => prev.filter((r) => r.id !== req.id));
-    } catch {}
+    } catch {
+      // Keep the row visible so the user can retry.
+    } finally {
+      setActionRequestId(null);
+    }
   };
 
   const handleCancelSent = async (req: FriendRequest) => {
+    if (actionRequestId) return;
+    setActionRequestId(req.id);
     try {
       await cancelFriendRequest(req.toUid);
       setSent((prev) => prev.filter((r) => r.id !== req.id));
-    } catch {}
+    } catch {
+      // Keep the row visible so the user can retry.
+    } finally {
+      setActionRequestId(null);
+    }
   };
 
   const handleAccept = async (req: FriendRequest) => {
+    if (actionRequestId) return;
+    setActionRequestId(req.id);
     try {
       await acceptFriendRequest(req.fromUid);
       setReceived((prev) => prev.filter((r) => r.id !== req.id));
       // Add to friends list with updated status
       setFriends((prev) => [...prev, { ...req, status: 'accepted' }]);
-    } catch {}
+    } catch {
+      // Keep the request visible so the user can retry.
+    } finally {
+      setActionRequestId(null);
+    }
   };
 
   const handleDecline = async (req: FriendRequest) => {
+    if (actionRequestId) return;
+    setActionRequestId(req.id);
     try {
       await declineFriendRequest(req.fromUid);
       setReceived((prev) => prev.filter((r) => r.id !== req.id));
-    } catch {}
+    } catch {
+      // Keep the request visible so the user can retry.
+    } finally {
+      setActionRequestId(null);
+    }
   };
 
   const handleStatusChange = (uid: string, status: RelationStatus) => {
@@ -198,6 +234,7 @@ export default function FriendsScreen() {
           <TouchableOpacity
             style={[styles.actionBtn, styles.removeBtn]}
             onPress={() => handleRemoveFriend(req)}
+            disabled={actionRequestId === req.id}
           >
             <Text style={styles.actionBtnText}>{t.friendsRemove}</Text>
           </TouchableOpacity>
@@ -207,6 +244,7 @@ export default function FriendsScreen() {
           <TouchableOpacity
             style={[styles.actionBtn, styles.cancelBtn]}
             onPress={() => handleCancelSent(req)}
+            disabled={actionRequestId === req.id}
           >
             <Text style={styles.actionBtnText}>{t.friendsCancel}</Text>
           </TouchableOpacity>
@@ -217,12 +255,14 @@ export default function FriendsScreen() {
             <TouchableOpacity
               style={[styles.actionBtn, styles.acceptBtn]}
               onPress={() => handleAccept(req)}
+              disabled={actionRequestId === req.id}
             >
               <Text style={styles.actionBtnText}>{t.friendsAccept}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.actionBtn, styles.declineBtn]}
               onPress={() => handleDecline(req)}
+              disabled={actionRequestId === req.id}
             >
               <Text style={styles.actionBtnText}>{t.friendsDecline}</Text>
             </TouchableOpacity>
@@ -292,6 +332,13 @@ export default function FriendsScreen() {
       {/* Content */}
       {loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
+      ) : loadError ? (
+        <View style={{ alignItems: 'center', padding: 32, gap: 14 }}>
+          <Text style={styles.emptyText}>{t.friendsLoadError}</Text>
+          <TouchableOpacity style={styles.actionBtn} onPress={() => void loadAll()}>
+            <Text style={styles.actionBtnText}>{t.commonRetry}</Text>
+          </TouchableOpacity>
+        </View>
       ) : activeTab !== 'ranking' && activeTab !== 'feed' ? (
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 100, paddingTop: 8 }}
@@ -346,7 +393,7 @@ export default function FriendsScreen() {
               leaderboard.map((player, i) => renderLeaderboardRow(player, i))
             )
           ) : (() => {
-            const myProfile = leaderboard.find((p) => p.uid === (require('../services/firebase').auth.currentUser?.uid));
+            const myProfile = leaderboard.find((p) => p.uid === auth.currentUser?.uid);
             const friendProfiles: PublicProfile[] = friends
               .map((f) => f.profile)
               .filter((p): p is PublicProfile => !!p);

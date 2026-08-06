@@ -54,14 +54,15 @@ export default function SuccessScreen() {
     if (!newRank) return;
 
     // Badge spring
-    Animated.parallel([
+    const badgeAnimation = Animated.parallel([
       Animated.spring(badgeScale, { toValue: 1, friction: 5, tension: 120, useNativeDriver: true }),
       Animated.timing(badgeOpacity, { toValue: 1, duration: 150, useNativeDriver: true }),
-    ]).start();
+    ]);
+    badgeAnimation.start();
 
     // Particle burst (fire all at once with small delays)
-    particleAnims.forEach(({ progress }, i) => {
-      Animated.sequence([
+    const particleAnimations = particleAnims.map(({ progress }, i) => {
+      const animation = Animated.sequence([
         Animated.delay(PARTICLES[i].delay),
         Animated.timing(progress, {
           toValue: 1,
@@ -69,26 +70,36 @@ export default function SuccessScreen() {
           easing: Easing.out(Easing.cubic),
           useNativeDriver: true,
         }),
-      ]).start();
+      ]);
+      animation.start();
+      return animation;
     });
 
     // Title
-    Animated.sequence([
+    const titleAnimation = Animated.sequence([
       Animated.delay(350),
       Animated.parallel([
         Animated.timing(titleOpacity, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.spring(titleTranslate, { toValue: 0, friction: 7, useNativeDriver: true }),
       ]),
-    ]).start();
+    ]);
+    titleAnimation.start();
 
     // Glow pulse loop
-    Animated.loop(
+    const glowAnimation = Animated.loop(
       Animated.sequence([
         Animated.timing(glow, { toValue: 1.07, duration: 700, useNativeDriver: true }),
         Animated.timing(glow, { toValue: 1, duration: 700, useNativeDriver: true }),
       ])
-    ).start();
-  }, [newRank]);
+    );
+    glowAnimation.start();
+    return () => {
+      badgeAnimation.stop();
+      particleAnimations.forEach((animation) => animation.stop());
+      titleAnimation.stop();
+      glowAnimation.stop();
+    };
+  }, [badgeOpacity, badgeScale, glow, newRank, particleAnims, titleOpacity, titleTranslate]);
 
   const styles = useMemo(() => makeStyles(colors), [colors]);
 
