@@ -1,17 +1,17 @@
 {
   "expo": {
-    "name": "V-Score",
-    "slug": "vscore",
+    "name": "Ratecade",
+    "slug": "ratecade",
     "version": "1.0.2",
     "orientation": "portrait",
-    "scheme": "vscore",
+    "scheme": "ratecade",
     "userInterfaceStyle": "automatic",
-    "icon": "./assets/images/Icone/IconeDef.png",
+    "icon": "./assets/images/Icone/NewLogo.png",
     "plugins": [
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/Icone/IconeDef.png",
+          "icon": "./assets/images/Icone/NewLogo.png",
           "color": "#7B2FBE"
         }
       ],
@@ -39,9 +39,9 @@
       },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSPhotoLibraryUsageDescription": "V-Score accesses your photo library so you can choose a profile picture to personalize your account.",
-        "NSCameraUsageDescription": "V-Score uses the camera so you can take a photo to set as your profile picture.",
-        "NSMicrophoneUsageDescription": "V-Score may access the microphone when recording a video for your profile picture."
+          "NSPhotoLibraryUsageDescription": "Ratecade accesses your photo library so you can choose a profile picture to personalize your account.",
+          "NSCameraUsageDescription": "Ratecade uses the camera so you can take a photo to set as your profile picture.",
+          "NSMicrophoneUsageDescription": "Ratecade may access the microphone when recording a video for your profile picture."
       }
     },
     "android": {

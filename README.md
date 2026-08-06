@@ -1,6 +1,6 @@
-# V-Score
+# Ratecade
 
-V-Score est une application mobile de découverte, de notation et de suivi de
+Ratecade est une application mobile de découverte, de notation et de suivi de
 jeux vidéo. Elle aide les joueurs à trouver leur prochain jeu, à noter ceux
 qu’ils ont terminés et à garder une trace de leur expérience.
 

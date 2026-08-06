@@ -44,7 +44,7 @@ type SectionDef = {
 const SECTION_DEFS: SectionDef[] = [
   { id: 'recommended',   title: '🎯 Recommended for you',           genre: 'DYNAMIC',                 ordering: '' },
   { id: 'recent',        title: '🆕 Recent releases',               genre: null,                      ordering: '-released' },
-  { id: 'community',     title: '👥 VScore community top',          genre: 'COMMUNITY',               ordering: '' },
+  { id: 'community',     title: '👥 Ratecade community top',         genre: 'COMMUNITY',               ordering: '' },
   { id: 'friends_liked', title: '❤️  Your friends love these',      genre: 'FRIENDS_LIKED',           ordering: '' },
   { id: 'popular',       title: '🔥 Most popular',                  genre: null,                      ordering: '-added' },
   { id: 'trending',      title: '🌟 Trending this month',           genre: null,                      ordering: '-added' },

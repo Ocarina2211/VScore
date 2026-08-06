@@ -3,7 +3,7 @@ import { getLocales } from 'expo-localization';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+import { Animated, Image, StyleSheet, Text, View } from 'react-native';
 import { Language, TRANSLATIONS } from '../constants/translations';
 import { signInAsGuest } from '../services/auth';
 import { auth } from '../services/firebase';
@@ -49,18 +49,8 @@ export default function Index() {
   const logoScale = useRef(new Animated.Value(0.5)).current;
   const xpWidth = useRef(new Animated.Value(0)).current;
   const dotsOpacity = useRef(new Animated.Value(0)).current;
-  const spinValue = useRef(new Animated.Value(0)).current;
-  const spinValue2 = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // Spinning circles (continuous)
-    Animated.loop(
-      Animated.timing(spinValue, { toValue: 1, duration: 3000, useNativeDriver: true, easing: (t) => t })
-    ).start();
-    Animated.loop(
-      Animated.timing(spinValue2, { toValue: 1, duration: 4500, useNativeDriver: true, easing: (t) => t })
-    ).start();
-
     // Logo appears
     Animated.parallel([
       Animated.spring(logoScale, { toValue: 1, friction: 6, tension: 80, useNativeDriver: true }),
@@ -114,29 +104,20 @@ export default function Index() {
       clearTimeout(xpTimer);
       clearTimeout(dotsTimer);
       clearTimeout(timer);
-      spinValue.stopAnimation();
-      spinValue2.stopAnimation();
     };
-  }, [dotsOpacity, fadeOut, logoScale, opacity, router, spinValue, spinValue2, xpWidth]);
+  }, [dotsOpacity, fadeOut, logoScale, opacity, router, xpWidth]);
 
   const xpBarWidth = xpWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '72%'] });
-  const spin = spinValue.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  const spinReverse = spinValue2.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] });
 
   return (
     <Animated.View style={[styles.container, { opacity: fadeOut }]}>
-      {/* V + Rotating neon circle */}
+      {/* Ratecade logo */}
       <Animated.View style={[styles.logoWrap, { opacity, transform: [{ scale: logoScale }] }]}>
-        {/* Ambient glow */}
-        <View style={styles.glow} />
-        {/* Static base ring */}
-        <View style={styles.ringBase} />
-        {/* Spinning arc 1 */}
-        <Animated.View style={[styles.spinArc1, { transform: [{ rotate: spin }] }]} />
-        {/* Spinning arc 2 (reverse, slower) */}
-        <Animated.View style={[styles.spinArc2, { transform: [{ rotate: spinReverse }] }]} />
-        {/* V text */}
-        <Text style={styles.vLetter}>V</Text>
+        <Image
+          source={require('../assets/images/Icone/RatecadeLogoTransparent.png')}
+          style={styles.logoImage}
+          resizeMode="contain"
+        />
       </Animated.View>
 
       {/* XP Bar */}
@@ -175,50 +156,9 @@ const styles = StyleSheet.create({
     width: 220,
     height: 220,
   },
-  glow: {
-    position: 'absolute',
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    backgroundColor: '#6D28D9',
-    opacity: 0.18,
-  },
-  ringBase: {
-    position: 'absolute',
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    borderWidth: 1.5,
-    borderColor: '#2A1550',
-  },
-  spinArc1: {
-    position: 'absolute',
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    borderWidth: 3.5,
-    borderTopColor: '#A855F7',
-    borderRightColor: '#EC4899',
-    borderBottomColor: 'transparent',
-    borderLeftColor: 'transparent',
-  },
-  spinArc2: {
-    position: 'absolute',
-    width: 200,
-    height: 200,
-    borderRadius: 100,
-    borderWidth: 2,
-    borderTopColor: 'transparent',
-    borderRightColor: 'transparent',
-    borderBottomColor: '#C084FC',
-    borderLeftColor: '#7C3AED',
-  },
-  vLetter: {
-    fontSize: 110,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    includeFontPadding: false,
-    lineHeight: 115,
+  logoImage: {
+    width: 220,
+    height: 220,
   },
   xpSection: {
     width: '100%',

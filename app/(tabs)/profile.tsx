@@ -379,7 +379,7 @@ export default function ProfileScreen() {
                 <Text style={styles.shareCardStatDot}>·</Text>
                 <Text style={styles.shareCardStatText}>{avgScore.toFixed(1)}★ avg</Text>
               </View>
-              <Text style={styles.shareCardFooter}>vscore.app</Text>
+              <Text style={styles.shareCardFooter}>Ratecade</Text>
             </View>
 
             {/* Actions */}

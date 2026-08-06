@@ -102,7 +102,7 @@ export default function OnboardingScreen() {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={styles.inner}>
-        <Text style={styles.logo}>V<Text style={styles.logoAccent}>-SCORE</Text></Text>
+        <Text style={styles.logo}>Rate<Text style={styles.logoAccent}>cade</Text></Text>
         <Text style={styles.headline}>{t.onboardingWelcome}</Text>
         <Text style={styles.subtitle}>{t.onboardingSubtitle}</Text>
 

@@ -38,7 +38,7 @@ async function request(path: string, init: RequestInit, forceRefresh: boolean): 
     } catch (error) {
       const timedOut = controller.signal.aborted;
       throw new ApiRequestError(
-        timedOut ? 'Le serveur VScore met trop de temps à répondre.' : 'Impossible de joindre le serveur VScore.',
+        timedOut ? 'Le serveur Ratecade met trop de temps à répondre.' : 'Impossible de joindre le serveur Ratecade.',
         null,
         timedOut ? 'timeout' : 'network',
       );
@@ -58,7 +58,7 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
     data = JSON.parse(body);
   } catch {
     throw new ApiRequestError(
-      `Le serveur VScore a renvoyé une réponse invalide (${response.status}).`,
+      `Le serveur Ratecade a renvoyé une réponse invalide (${response.status}).`,
       response.status,
       'invalid-response',
     );
@@ -66,7 +66,7 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
 
   if (!response.ok) {
     throw new ApiRequestError(
-      typeof data?.error === 'string' ? data.error : `Erreur serveur VScore (${response.status}).`,
+      typeof data?.error === 'string' ? data.error : `Erreur serveur Ratecade (${response.status}).`,
       response.status,
       'http',
     );

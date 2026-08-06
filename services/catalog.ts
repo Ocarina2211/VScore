@@ -153,7 +153,7 @@ async function communityGameFallback(id: number): Promise<any | null> {
       platforms: [],
       publishers: [],
       developers: [],
-      _fallbackProvider: 'VScore community',
+      _fallbackProvider: 'Ratecade community',
     };
   } catch {
     const local = await localLegacyGame(id);
@@ -166,7 +166,7 @@ async function communityGameFallback(id: number): Promise<any | null> {
       platforms: [],
       publishers: [],
       developers: [],
-      _fallbackProvider: 'VScore local data',
+      _fallbackProvider: 'Ratecade local data',
     } : null;
   }
 }

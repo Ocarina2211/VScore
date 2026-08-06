@@ -50,7 +50,7 @@ export default function SettingsScreen() {
   }, []);
 
   const scheduleReminder = useCallback(async () => {
-    await rescheduleInactivityReminderAsync('🎮 V-Score', t.settingsNotifBody);
+    await rescheduleInactivityReminderAsync('🎮 Ratecade', t.settingsNotifBody);
   }, [t.settingsNotifBody]);
 
   // Refresh auth state when screen focuses

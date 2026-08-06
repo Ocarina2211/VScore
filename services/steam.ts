@@ -1,4 +1,4 @@
-// Steam Web API integration through the authenticated VScore Worker.
+// Steam Web API integration through the authenticated Ratecade Worker.
 import { apiFetch } from './api';
 
 export interface SteamGame {
