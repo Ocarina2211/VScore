@@ -320,7 +320,13 @@ export default function FriendsScreen() {
               style={[styles.tab, activeTab === tab && styles.tabActive]}
               onPress={() => setActiveTab(tab)}
             >
-              <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
+              <Text
+                style={[styles.tabText, activeTab === tab && styles.tabTextActive]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.65}
+                allowFontScaling={false}
+              >
                 {label}
                 {count !== null && count > 0 ? ` (${count})` : ''}
               </Text>

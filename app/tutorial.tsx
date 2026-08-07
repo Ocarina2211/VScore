@@ -56,7 +56,11 @@ function SlideLanguage({ colors }: { colors: any }) {
   return (
     <View style={[slideStyles.container, { backgroundColor: colors.background }]}>
       <View style={slideStyles.crystal}>
-        <Text style={[slideStyles.crystalV, { color: colors.primary }]}>V</Text>
+        <Image
+          source={require('../assets/images/Icone/RatecadeLogoTransparent.png')}
+          style={slideStyles.crystalLogo}
+          resizeMode="contain"
+        />
       </View>
       <Text style={[slideStyles.bigTitle, { color: colors.text }]}>{t.tutorialLanguageTitle}</Text>
       <Text style={[slideStyles.body, { color: colors.textSecondary }]}>{t.tutorialLanguageSubtitle}</Text>
@@ -495,7 +499,7 @@ const slideStyles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     marginBottom: 8,
   },
-  crystalV: { fontSize: 40, fontWeight: '900' },
+  crystalLogo: { width: 76, height: 76 },
   bigTitle: { fontSize: 26, fontWeight: '900', textAlign: 'center', lineHeight: 34 },
   body: { fontSize: 15, textAlign: 'center', lineHeight: 22 },
   langRow: { flexDirection: 'row', gap: 16, marginTop: 8 },

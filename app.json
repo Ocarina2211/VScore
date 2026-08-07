@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ratecade",
     "slug": "ratecade",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "orientation": "portrait",
     "scheme": "ratecade",
     "userInterfaceStyle": "automatic",
@@ -30,7 +30,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.jdecesco.vscore",
-      "buildNumber": "7",
+      "buildNumber": "9",
       "usesAppleSignIn": true,
       "entitlements": {
         "keychain-access-groups": [

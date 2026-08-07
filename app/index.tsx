@@ -73,6 +73,7 @@ export default function Index() {
     // Fade out and navigate
     const timer = setTimeout(() => {
       Animated.timing(fadeOut, { toValue: 0, duration: 500, useNativeDriver: true }).start(async () => {
+        // Keep the tutorial limited to the first launch in production.
         const forceTutorialForTesting = false;
         const tutorialSeen = await loadData(USER_KEYS.tutorialSeen);
         const notificationRoute = await consumeInitialNotificationRouteAsync();
