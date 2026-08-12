@@ -1,8 +1,8 @@
 {
   "expo": {
     "name": "Ratecade",
-    "slug": "ratecade",
-    "version": "1.0.3",
+    "slug": "vscore",
+    "version": "2.0.1",
     "orientation": "portrait",
     "scheme": "ratecade",
     "userInterfaceStyle": "automatic",

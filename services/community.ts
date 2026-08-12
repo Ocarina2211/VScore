@@ -821,26 +821,33 @@ export async function declineFriendRequest(fromUid: string): Promise<void> {
 /** Remove a friend (delete the accepted request doc in either direction) */
 export async function removeFriend(friendUid: string): Promise<void> {
   const myUid = getUid();
-  const firstRef = doc(db, 'friend_requests', `${myUid}_${friendUid}`);
-  const secondRef = doc(db, 'friend_requests', `${friendUid}_${myUid}`);
-  await runTransaction(db, async (tx) => {
-    const [first, second] = await Promise.all([tx.get(firstRef), tx.get(secondRef)]);
-    if (first.exists()) tx.delete(firstRef);
-    if (second.exists()) tx.delete(secondRef);
-  });
+  // Query existing documents first. Reading a potentially missing document
+  // inside a transaction is rejected by the Firestore read rule.
+  const [outgoing, incoming] = await Promise.all([
+    getDocs(query(collection(db, 'friend_requests'), where('fromUid', '==', myUid))),
+    getDocs(query(collection(db, 'friend_requests'), where('toUid', '==', myUid))),
+  ]);
+  const docsToDelete = [
+    ...outgoing.docs.filter((snapshot) => snapshot.data().toUid === friendUid),
+    ...incoming.docs.filter((snapshot) => snapshot.data().fromUid === friendUid),
+  ];
+  await Promise.all(docsToDelete.map((snapshot) => deleteDoc(snapshot.ref)));
 }
 
 /** Get the relationship status between the current user and another user */
 export async function getRelationStatus(otherUid: string): Promise<RelationStatus> {
   const myUid = getUid();
-  const id1 = `${myUid}_${otherUid}`;
-  const id2 = `${otherUid}_${myUid}`;
-  const [s1, s2] = await Promise.all([
-    getDoc(doc(db, 'friend_requests', id1)),
-    getDoc(doc(db, 'friend_requests', id2)),
+  // Query both directions instead of reading two document IDs directly.
+  // A direct read of a missing document is rejected by the Firestore rule
+  // that checks resource.data, which made existing friends look like `none`.
+  const [outgoing, incoming] = await Promise.all([
+    getDocs(query(collection(db, 'friend_requests'), where('fromUid', '==', myUid))),
+    getDocs(query(collection(db, 'friend_requests'), where('toUid', '==', myUid))),
   ]);
-  const firstStatus = s1.exists() ? s1.data()!.status : null;
-  const secondStatus = s2.exists() ? s2.data()!.status : null;
+  const outgoingDoc = outgoing.docs.find((snapshot) => snapshot.data().toUid === otherUid);
+  const incomingDoc = incoming.docs.find((snapshot) => snapshot.data().fromUid === otherUid);
+  const firstStatus = outgoingDoc?.data().status ?? null;
+  const secondStatus = incomingDoc?.data().status ?? null;
   if (firstStatus === 'accepted' || secondStatus === 'accepted') return 'friends';
   // Legacy crossed requests remain actionable: expose the incoming side so the
   // user can accept it and the transactional accept path removes the duplicate.

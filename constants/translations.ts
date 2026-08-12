@@ -4,6 +4,7 @@ export type Translations = {
   // Tabs
   tabHome: string;
   tabRank: string;
+  tabSocial: string;
   tabProfile: string;
   tabSettings: string;
   discoverTitle: string;
@@ -162,6 +163,7 @@ export type Translations = {
 
   // Friends
   friendsAddFriendTitle: string;
+  friendsAddButton: string;
   friendsMyFriends: string;
   friendsSearch: string;
   friendsSearchHint: string;
@@ -335,6 +337,7 @@ const en: Translations = {
   // Tabs
   tabHome: 'Home',
   tabRank: 'Rate',
+  tabSocial: 'Social',
   tabProfile: 'Profile',
   tabSettings: 'Settings',
   discoverTitle: 'Discover',
@@ -493,6 +496,7 @@ const en: Translations = {
 
   // Friends
   friendsAddFriendTitle: 'ADD FRIENDS',
+  friendsAddButton: 'Add friends 👥+',
   friendsMyFriends: 'My Friends 👥',
   friendsSearch: 'Search by username...',
   friendsSearchHint: 'Type at least 2 characters',
@@ -692,6 +696,7 @@ const fr: Translations = {
   // Tabs
   tabHome: 'Accueil',
   tabRank: 'Noter',
+  tabSocial: 'Social',
   tabProfile: 'Profil',
   tabSettings: 'Réglages',
   discoverTitle: 'Découvrir',
@@ -850,6 +855,7 @@ const fr: Translations = {
 
   // Friends
   friendsAddFriendTitle: 'AJOUTER DES AMIS',
+  friendsAddButton: 'Ajouter des amis 👥+',
   friendsMyFriends: 'Mes amis 👥',
   friendsSearch: 'Rechercher par pseudo...',
   friendsSearchHint: 'Tape au moins 2 caractères',

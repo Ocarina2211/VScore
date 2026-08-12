@@ -4,6 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Image,
+    Platform,
     RefreshControl,
     ScrollView,
     StyleSheet,
@@ -11,6 +12,7 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import AddFriendModal from '../components/AddFriendModal';
 import UserProfileModal from '../components/UserProfileModal';
 import { getRank } from '../constants/Games';
 import { useTranslation } from '../contexts/I18nContext';
@@ -34,6 +36,10 @@ import {
 
 type Tab = 'friends' | 'sent' | 'received' | 'ranking' | 'feed';
 
+type FriendsScreenProps = {
+  asTab?: boolean;
+};
+
 function AvatarImage({ uri, style }: { uri?: string; style: any }) {
   const [error, setError] = useState(false);
   const isInvalid = !uri || uri.startsWith('blob:');
@@ -41,7 +47,7 @@ function AvatarImage({ uri, style }: { uri?: string; style: any }) {
   return <Image source={{ uri }} style={style} onError={() => setError(true)} />;
 }
 
-export default function FriendsScreen() {
+export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
   const colors = useColors();
   const t = useTranslation();
   const router = useRouter();
@@ -58,6 +64,7 @@ export default function FriendsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
+  const [addFriendModalVisible, setAddFriendModalVisible] = useState(false);
   const [actionRequestId, setActionRequestId] = useState<string | null>(null);
 
   const lastLoadRef = useRef(0);
@@ -282,13 +289,30 @@ export default function FriendsScreen() {
       ? t.friendsNoSent
       : t.friendsNoReceived;
 
+  const contentPaddingBottom = asTab ? 140 : 100;
+
   return (
     <View style={styles.container}>
+      {asTab && (
+        <AddFriendModal
+          visible={addFriendModalVisible}
+          onClose={() => setAddFriendModalVisible(false)}
+          onViewProfile={(uid) => {
+            setAddFriendModalVisible(false);
+            setSelectedUid(uid);
+          }}
+        />
+      )}
+
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={22} color={colors.text} />
-        </TouchableOpacity>
+        {asTab ? (
+          <View style={{ width: 40 }} />
+        ) : (
+          <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={22} color={colors.text} />
+          </TouchableOpacity>
+        )}
         <Text style={styles.headerTitle}>{t.friendsPageTitle}</Text>
         <View style={{ width: 40 }} />
       </View>
@@ -347,7 +371,7 @@ export default function FriendsScreen() {
         </View>
       ) : activeTab !== 'ranking' && activeTab !== 'feed' ? (
         <ScrollView
-          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 100, paddingTop: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -367,7 +391,7 @@ export default function FriendsScreen() {
       {/* Ranking tab */}
       {!loading && activeTab === 'ranking' && (
         <ScrollView
-          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 100, paddingTop: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
           }
@@ -419,7 +443,7 @@ export default function FriendsScreen() {
       {/* Feed tab */}
       {!loading && activeTab === 'feed' && (
         <ScrollView
-          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 100, paddingTop: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
           }
@@ -482,6 +506,17 @@ export default function FriendsScreen() {
         onClose={() => setSelectedUid(null)}
         onStatusChange={handleStatusChange}
       />
+
+      {asTab && (
+        <TouchableOpacity
+          style={[styles.addFriendFloating, { bottom: Platform.OS === 'ios' ? 104 : 76 }]}
+          onPress={() => setAddFriendModalVisible(true)}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="person-add-outline" size={18} color={colors.text} />
+          <Text style={styles.addFriendFloatingText}>{t.friendsAddButton}</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -505,6 +540,26 @@ const makeStyles = (c: any) =>
       alignItems: 'center',
       justifyContent: 'center',
     },
+    addFriendFloating: {
+      position: 'absolute',
+      left: 20,
+      right: 20,
+      bottom: 0,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: c.primary,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      elevation: 8,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.25,
+      shadowRadius: 6,
+      zIndex: 10,
+    },
+    addFriendFloatingText: { color: c.text, fontSize: 14, fontWeight: '800' },
     headerTitle: {
       color: c.text,
       fontSize: 18,

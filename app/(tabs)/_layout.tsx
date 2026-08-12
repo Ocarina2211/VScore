@@ -30,6 +30,11 @@ export default function TabLayout() {
         <Label>{t.tabRank}</Label>
       </NativeTabs.Trigger>
 
+      <NativeTabs.Trigger name="social">
+        <Icon src={require('../../assets/images/icons/social-icon.png')} />
+        <Label>{t.tabSocial}</Label>
+      </NativeTabs.Trigger>
+
       <NativeTabs.Trigger name="profile">
         <Icon
           androidSrc={{

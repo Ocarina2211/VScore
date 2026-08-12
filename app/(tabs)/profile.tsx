@@ -8,13 +8,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Image, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { captureRef } from 'react-native-view-shot';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import AddFriendModal from '../../components/AddFriendModal';
 import RankModal from '../../components/RankModal';
-import UserProfileModal from '../../components/UserProfileModal';
 import { getNextRank, getRank } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { getReceivedRequests, isPseudoTaken, syncListsFromFirestore, syncProfileFromFirestore, syncPublicProfile, syncRatingsFromFirestore } from '../../services/community';
+import { isPseudoTaken, syncListsFromFirestore, syncProfileFromFirestore, syncPublicProfile, syncRatingsFromFirestore } from '../../services/community';
 import { auth } from '../../services/firebase';
 import { fetchGames } from '../../services/games';
 import { createGameIdentityMatcher, normalizeGameName } from '../../services/gameIdentity';
@@ -38,14 +36,11 @@ export default function ProfileScreen() {
   const [ratingQuery, setRatingQuery] = useState('');
   const [sortKey, setSortKey] = useState<'date' | 'score' | 'meta' | 'title'>('date');
   const [rankModalVisible, setRankModalVisible] = useState(false);
-  const [addFriendModalVisible, setAddFriendModalVisible] = useState(false);
-  const [viewProfileUid, setViewProfileUid] = useState<string | null>(null);
   const [pseudo, setPseudo] = useState('PSEUDO');
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
   const [pseudoModalVisible, setPseudoModalVisible] = useState(false);
   const [editPseudoValue, setEditPseudoValue] = useState('');
   const [lastPseudoChange, setLastPseudoChange] = useState<number | null>(null);
-  const [pendingRequests, setPendingRequests] = useState(0);
   const [gameLists, setGameLists] = useState<any[]>([]);
   const [activeListTab, setActiveListTab] = useState<'wishlist' | 'backlog' | 'playing' | 'completed'>('wishlist');
   const [shareCardVisible, setShareCardVisible] = useState(false);
@@ -118,10 +113,6 @@ export default function ProfileScreen() {
     useCallback(() => {
       let active = true;
       (async () => {
-        try {
-          const reqs = await getReceivedRequests();
-          if (active) setPendingRequests(reqs.length);
-        } catch {}
         if (active) await loadProfileData();
         // Load Steam library
         if (active) {
@@ -326,17 +317,6 @@ export default function ProfileScreen() {
         ]}
       >
       <RankModal visible={rankModalVisible} currentXP={xp} onClose={() => setRankModalVisible(false)} />
-      <AddFriendModal
-        visible={addFriendModalVisible}
-        onClose={() => setAddFriendModalVisible(false)}
-        onViewProfile={(uid) => { setAddFriendModalVisible(false); setViewProfileUid(uid); }}
-      />
-      <UserProfileModal
-        visible={!!viewProfileUid}
-        uid={viewProfileUid}
-        onClose={() => setViewProfileUid(null)}
-      />
-
       {/* Share card modal */}
       <Modal visible={shareCardVisible} transparent animationType="fade" onRequestClose={() => setShareCardVisible(false)}>
         <View style={styles.shareOverlay}>
@@ -446,17 +426,6 @@ export default function ProfileScreen() {
             <Ionicons name="share-outline" size={22} color={colors.text} />
           </TouchableOpacity>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/friends' as any)}>
-              <Ionicons name="people-outline" size={22} color={colors.text} />
-              {pendingRequests > 0 && (
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>{pendingRequests > 9 ? '9+' : pendingRequests}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.addFriendBtn} onPress={() => setAddFriendModalVisible(true)}>
-              <Text style={styles.addFriendText}>Add friends 👥+</Text>
-            </TouchableOpacity>
             <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/settings' as any)}>
               <Ionicons name="settings-outline" size={22} color={colors.text} />
             </TouchableOpacity>
@@ -772,8 +741,6 @@ const makeStyles = (c: any) => StyleSheet.create({
   badge: { position: 'absolute', top: -4, right: -4, minWidth: 17, height: 17, borderRadius: 9, backgroundColor: '#E74C3C', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
   badgeText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
   iconBtnText: { fontSize: 20 },
-  addFriendBtn: { backgroundColor: c.primary, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 },
-  addFriendText: { color: c.text, fontWeight: '700', fontSize: 14 },
   profileCenter: { alignItems: 'center', gap: 10 },
   avatarWrap: { width: 90, height: 90, borderRadius: 45, borderWidth: 3, borderColor: c.primary, overflow: 'hidden' },
   avatarImage: { width: 90, height: 90, borderRadius: 45, resizeMode: 'cover' },
