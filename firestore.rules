@@ -40,8 +40,23 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if signedIn();
-      allow create, update: if isOwner(uid)
+      allow create: if isOwner(uid)
         && request.resource.data.keys().hasOnly([
+          'pseudo', 'pseudoLower', 'avatarUri', 'xp', 'top3',
+          'lists', 'listsUpdatedAt', 'memberSince', 'updatedAt',
+          'expoPushTokens', 'notificationsEnabled', 'notificationLanguage',
+          'pushTokenUpdatedAt'
+        ])
+        && validPseudo(request.resource.data)
+        && request.resource.data.xp is number
+        && request.resource.data.xp >= 0
+        && request.resource.data.xp <= 100000000;
+      // Validate only fields changed by the current client. Older app versions
+      // wrote legacy fields such as `verified`; rejecting the whole resulting
+      // document made every later XP/profile update fail. Legacy fields may
+      // remain, but clients cannot add, alter, or remove them.
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'pseudo', 'pseudoLower', 'avatarUri', 'xp', 'top3',
           'lists', 'listsUpdatedAt', 'memberSince', 'updatedAt',
           'expoPushTokens', 'notificationsEnabled', 'notificationLanguage',

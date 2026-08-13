@@ -52,6 +52,8 @@ export default function ProfileScreen() {
   const [steamGames, setSteamGames] = useState<SteamGame[]>([]);
   const [steamExpanded, setSteamExpanded] = useState(false);
   const [steamLoading, setSteamLoading] = useState(false);
+  const [steamLinked, setSteamLinked] = useState(false);
+  const [steamLoadError, setSteamLoadError] = useState(false);
   const router = useRouter();
 
   // Version hybride : local + Firestore (restauration de l'ancien comportement)
@@ -109,30 +111,40 @@ export default function ProfileScreen() {
     return unsubscribe;
   }, [loadProfileData]);
 
+  const loadSteamLibrary = useCallback(async () => {
+    const steamData = await loadData(USER_KEYS.steamId);
+    const linked = Boolean(steamData?.steamId);
+    setSteamLinked(linked);
+    setSteamLoadError(false);
+    if (!steamData?.steamId) {
+      setSteamGames([]);
+      setSteamLoading(false);
+      return;
+    }
+
+    setSteamLoading(true);
+    try {
+      const games = await getSteamOwnedGames(steamData.steamId);
+      setSteamGames(games.sort((a, b) => b.playtime_forever - a.playtime_forever));
+    } catch (error) {
+      console.warn('[Profile] Failed to load Steam library:', error instanceof Error ? error.message : error);
+      setSteamGames([]);
+      setSteamLoadError(true);
+      setSteamExpanded(true);
+    } finally {
+      setSteamLoading(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       let active = true;
       (async () => {
         if (active) await loadProfileData();
-        // Load Steam library
-        if (active) {
-          const steamData = await loadData(USER_KEYS.steamId);
-          if (steamData?.steamId) {
-            setSteamLoading(true);
-            setSteamGames([]);
-            try {
-              const games = await getSteamOwnedGames(steamData.steamId);
-              if (active) setSteamGames(games.sort((a, b) => b.playtime_forever - a.playtime_forever));
-            } catch {}
-            if (active) setSteamLoading(false);
-          } else {
-            setSteamGames([]);
-            setSteamLoading(false);
-          }
-        }
+        if (active) await loadSteamLibrary();
       })();
       return () => { active = false; };
-    }, [loadProfileData])
+    }, [loadProfileData, loadSteamLibrary])
   );
 
   const rank = getRank(xp);
@@ -552,7 +564,7 @@ export default function ProfileScreen() {
       </View>
 
       {/* Steam Library */}
-      {steamGames.length > 0 && (
+      {steamLinked && (
         <View style={styles.steamSection}>
           <TouchableOpacity style={styles.steamHeader} onPress={() => setSteamExpanded(!steamExpanded)} activeOpacity={0.7}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -563,6 +575,18 @@ export default function ProfileScreen() {
           </TouchableOpacity>
           {steamExpanded && (
             <View style={styles.steamList}>
+              {steamLoading && <Text style={styles.steamStatus}>{t.commonLoading}</Text>}
+              {!steamLoading && steamLoadError && (
+                <View style={styles.steamStatusCard}>
+                  <Text style={styles.steamStatus}>{t.profileSteamUnavailable}</Text>
+                  <TouchableOpacity style={styles.steamRetryBtn} onPress={loadSteamLibrary}>
+                    <Text style={styles.steamRetryText}>{t.commonRetry}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {!steamLoading && !steamLoadError && steamGames.filter((game) => !isRatedGame(game)).length === 0 && (
+                <Text style={styles.steamStatus}>{t.profileSteamEmpty}</Text>
+              )}
               {steamGames
                 .filter((game) => !isRatedGame(game))
                 .slice(0, 50)
@@ -605,7 +629,6 @@ export default function ProfileScreen() {
                     </TouchableOpacity>
                   </View>
                 ))}
-              {steamLoading && <Text style={styles.steamGameTime}>{t.commonLoading}</Text>}
             </View>
           )}
         </View>
@@ -920,4 +943,8 @@ const makeStyles = (c: any) => StyleSheet.create({
   steamGameName: { color: c.text, fontSize: 13, fontWeight: '600' },
   steamGameTime: { color: c.textSecondary, fontSize: 11, marginTop: 1 },
   steamAddBtn: { width: 32, height: 32, borderRadius: 10, backgroundColor: c.primary, alignItems: 'center', justifyContent: 'center' },
+  steamStatusCard: { gap: 10, backgroundColor: c.backgroundSecondary, borderRadius: 12, padding: 14 },
+  steamStatus: { color: c.textSecondary, fontSize: 12, lineHeight: 17 },
+  steamRetryBtn: { alignSelf: 'flex-start', borderRadius: 9, backgroundColor: c.primary, paddingHorizontal: 12, paddingVertical: 8 },
+  steamRetryText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
 });

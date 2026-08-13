@@ -106,9 +106,6 @@ export type Translations = {
   settingsSteamLink: string;
   settingsSteamLinked: string;
   settingsSteamUnlink: string;
-  settingsSteamIdPlaceholder: string;
-  settingsSteamIdHint: string;
-  settingsSteamConnect: string;
   settingsSteamError: string;
   settingsSteamSuccess: string;
 
@@ -141,6 +138,8 @@ export type Translations = {
   profileSortTitle: string;
   profileNoRatings: string;
   profileNoResultsFor: (query: string) => string;
+  profileSteamUnavailable: string;
+  profileSteamEmpty: string;
   profileShareBtn: string;
   profileCriteriaTitle: string;
   profileStrongest: string;
@@ -436,13 +435,10 @@ const en: Translations = {
 
   // Steam
   settingsSteamSection: 'Gaming platforms',
-  settingsSteamLink: 'Link Steam account',
+  settingsSteamLink: 'Sign in with Steam',
   settingsSteamLinked: 'Steam connected',
   settingsSteamUnlink: 'Unlink',
-  settingsSteamIdPlaceholder: 'Steam ID or profile URL',
-  settingsSteamIdHint: 'Find your Steam ID at steamid.io or paste your profile URL',
-  settingsSteamConnect: 'Connect',
-  settingsSteamError: 'Unable to find this Steam profile. Check the ID and try again.',
+  settingsSteamError: 'Unable to sign in with Steam. Please try again.',
   settingsSteamSuccess: '✓ Steam account linked!',
 
   // Profile
@@ -474,6 +470,8 @@ const en: Translations = {
   profileSortMeta: 'Critic score',
   profileSortTitle: 'A → Z',
   profileNoRatings: 'No games rated yet',
+  profileSteamUnavailable: 'Your Steam library is temporarily unavailable. Please try again later.',
+  profileSteamEmpty: 'No games available to import. Check that your Steam game details are public.',
   profileNoResultsFor: (query) => `No results for "${query}"`,
   profileShareBtn: 'Share as image',
   profileCriteriaTitle: 'Taste profile',
@@ -795,13 +793,10 @@ const fr: Translations = {
 
   // Steam
   settingsSteamSection: 'Plateformes de jeu',
-  settingsSteamLink: 'Lier un compte Steam',
+  settingsSteamLink: 'Se connecter avec Steam',
   settingsSteamLinked: 'Steam connecté',
   settingsSteamUnlink: 'Délier',
-  settingsSteamIdPlaceholder: 'Steam ID ou URL du profil',
-  settingsSteamIdHint: 'Trouve ton Steam ID sur steamid.io ou colle ton URL de profil',
-  settingsSteamConnect: 'Connecter',
-  settingsSteamError: 'Impossible de trouver ce profil Steam. Vérifie l\'ID et réessaie.',
+  settingsSteamError: 'Impossible de se connecter avec Steam. Réessaie.',
   settingsSteamSuccess: '✓ Compte Steam lié !',
 
   // Profile
@@ -832,6 +827,8 @@ const fr: Translations = {
   profileSortMeta: 'Score critiques',
   profileSortTitle: 'A → Z',
   profileNoRatings: "Aucun jeu noté pour l'instant",
+  profileSteamUnavailable: 'Ta bibliothèque Steam est temporairement indisponible. Réessaie plus tard.',
+  profileSteamEmpty: 'Aucun jeu à importer. Vérifie que les détails de tes jeux Steam sont publics.',
   profileNoResultsFor: (query) => `Aucun résultat pour "${query}"`,
   profileShareBtn: 'Partager en image',
   profileCriteriaTitle: 'Profil de goûts',

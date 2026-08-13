@@ -2,6 +2,23 @@
   "firestore": {
     "rules": "firestore.rules"
   },
+  "hosting": {
+    "site": "ratecade-auth",
+    "public": "hosting",
+    "cleanUrls": true,
+    "trailingSlash": false,
+    "headers": [
+      {
+        "source": "/steam-auth{,/**}",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-store" },
+          { "key": "Content-Security-Policy", "value": "default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
+          { "key": "Referrer-Policy", "value": "no-referrer" },
+          { "key": "X-Content-Type-Options", "value": "nosniff" }
+        ]
+      }
+    ]
+  },
   "functions": [
     {
       "source": "functions",

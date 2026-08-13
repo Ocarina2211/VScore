@@ -1,11 +1,42 @@
 // Steam Web API integration through the authenticated Ratecade Worker.
+import * as WebBrowser from 'expo-web-browser';
 import { apiFetch } from './api';
+
+const STEAM_AUTH_REDIRECT_URL = 'ratecade://steam-auth';
 
 export interface SteamGame {
   appid: number;
   name: string;
   playtime_forever: number; // minutes
   img_icon_url: string;
+}
+
+export interface LinkedSteamAccount {
+  steamId: string;
+  steamName: string | null;
+}
+
+/**
+ * Authenticate on Steam's official website and securely exchange the verified
+ * OpenID result through the Ratecade Worker. Ratecade never sees the password.
+ */
+export async function authenticateWithSteam(): Promise<LinkedSteamAccount | null> {
+  const { authUrl } = await apiFetch<{ authUrl: string }>('/steam/auth/start');
+  const result = await WebBrowser.openAuthSessionAsync(authUrl, STEAM_AUTH_REDIRECT_URL);
+  if (result.type === 'cancel' || result.type === 'dismiss') return null;
+  if (result.type !== 'success') throw new Error('Steam authentication did not complete.');
+
+  const redirect = new URL(result.url);
+  if (redirect.protocol !== 'ratecade:' || redirect.hostname !== 'steam-auth') {
+    throw new Error('Invalid Steam authentication redirect.');
+  }
+  const error = redirect.searchParams.get('error');
+  if (error === 'cancelled') return null;
+  if (error) throw new Error(`Steam authentication failed (${error}).`);
+  const token = redirect.searchParams.get('token');
+  if (!token) throw new Error('Steam authentication result is missing.');
+
+  return apiFetch<LinkedSteamAccount>(`/steam/auth/complete?token=${encodeURIComponent(token)}`);
 }
 
 /**

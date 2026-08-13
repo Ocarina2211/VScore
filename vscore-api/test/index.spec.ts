@@ -59,6 +59,7 @@ const TEST_ENV = {
 	IGDB_CLIENT_ID: "igdb-client",
 	IGDB_CLIENT_SECRET: "igdb-secret",
 	STEAM_API_KEY: "steam-secret",
+	STEAM_AUTH_SECRET: "steam-auth-secret-with-at-least-32-bytes",
 	DEEPL_API_KEY: "deepl-secret",
 	FIREBASE_PROJECT_ID: "vscore-test",
 } as Env & Record<string, string>;
@@ -82,6 +83,7 @@ async function run(request: Request, workerEnv = env): Promise<Response> {
 		IGDB_CLIENT_ID: string;
 		IGDB_CLIENT_SECRET: string;
 		STEAM_API_KEY: string;
+		STEAM_AUTH_SECRET: string;
 		DEEPL_API_KEY: string;
 		FIREBASE_PROJECT_ID: string;
 	}, ctx);
@@ -130,6 +132,9 @@ describe("VScore API worker", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 			const url = String(input);
 			if (url.includes("googleapis.com/robot/v1/metadata")) {
+				throw new Error("Primary Firebase certificate endpoint unavailable");
+			}
+			if (url.includes("googleapis.com/service_accounts/v1/metadata")) {
 				return Response.json({ "test-key": TEST_CERTIFICATE }, { headers: { "Cache-Control": "max-age=3600" } });
 			}
 			throw new Error(`Unexpected upstream request: ${url}`);
@@ -335,6 +340,67 @@ describe("VScore API worker", () => {
 		expect(response.status).toBe(200);
 		expect(upstreamUrl).toContain("key=steam-secret");
 		expect(response.headers.get("authorization")).toBeNull();
+	});
+
+	it("authenticates a Steam account through OpenID and binds the result to the Firebase user", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.includes("googleapis.com/robot/v1/metadata")) {
+				return Response.json({ "test-key": TEST_CERTIFICATE }, { headers: { "Cache-Control": "max-age=3600" } });
+			}
+			if (url === "https://steamcommunity.com/openid/login") {
+				return new Response("ns:http://specs.openid.net/auth/2.0\nis_valid:true\n");
+			}
+			if (url.includes("ISteamUser/GetPlayerSummaries")) {
+				return new Response("Forbidden", { status: 403 });
+			}
+			throw new Error(`Unexpected upstream request: ${url}`);
+		});
+
+		const authorization = `Bearer ${await firebaseToken()}`;
+		const startResponse = await run(new IncomingRequest(
+			"https://example.com/steam/auth/start",
+			{ headers: { Authorization: authorization } },
+		), TEST_ENV);
+		expect(startResponse.status).toBe(200);
+		const { authUrl } = await startResponse.json() as { authUrl: string };
+		const openIdUrl = new URL(authUrl);
+		expect(openIdUrl.origin).toBe("https://steamcommunity.com");
+		expect(openIdUrl.searchParams.get("openid.mode")).toBe("checkid_setup");
+
+		const returnTo = new URL(openIdUrl.searchParams.get("openid.return_to")!);
+		expect(returnTo.origin).toBe("https://ratecade-auth.web.app");
+		expect(returnTo.pathname).toBe("/steam-auth");
+		expect(openIdUrl.searchParams.get("openid.realm")).toBe("https://ratecade-auth.web.app/");
+		const callback = new URL("https://example.com/steam/auth/callback");
+		callback.searchParams.set("state", returnTo.searchParams.get("state")!);
+		callback.searchParams.set("openid.ns", "http://specs.openid.net/auth/2.0");
+		callback.searchParams.set("openid.mode", "id_res");
+		callback.searchParams.set("openid.op_endpoint", "https://steamcommunity.com/openid/login");
+		callback.searchParams.set("openid.claimed_id", "https://steamcommunity.com/openid/id/76561198000000000");
+		callback.searchParams.set("openid.identity", "https://steamcommunity.com/openid/id/76561198000000000");
+		callback.searchParams.set("openid.return_to", returnTo.toString());
+		callback.searchParams.set("openid.response_nonce", "2026-08-13T10:00:00Znonce");
+		callback.searchParams.set("openid.assoc_handle", "test-association");
+		callback.searchParams.set("openid.signed", "signed,op_endpoint,claimed_id,identity,return_to,response_nonce,assoc_handle");
+		callback.searchParams.set("openid.sig", "test-signature");
+
+		const callbackResponse = await run(new IncomingRequest(callback), TEST_ENV);
+		expect(callbackResponse.status).toBe(302);
+		const appRedirect = new URL(callbackResponse.headers.get("location")!);
+		expect(appRedirect.protocol).toBe("ratecade:");
+		const resultToken = appRedirect.searchParams.get("token");
+		expect(resultToken).toBeTruthy();
+
+		const completeResponse = await run(new IncomingRequest(
+			`https://example.com/steam/auth/complete?token=${encodeURIComponent(resultToken!)}`,
+			{ headers: { Authorization: authorization } },
+		), TEST_ENV);
+		expect(completeResponse.status).toBe(200);
+		expect(await completeResponse.json()).toEqual({
+			steamId: "76561198000000000",
+			steamName: null,
+		});
 	});
 
 	it("proxies authenticated DeepL requests with the expected payload", async () => {

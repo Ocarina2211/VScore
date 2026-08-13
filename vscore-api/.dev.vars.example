@@ -1,4 +1,5 @@
 IGDB_CLIENT_ID=replace-me
 IGDB_CLIENT_SECRET=replace-me
 STEAM_API_KEY=replace-me
+STEAM_AUTH_SECRET=replace-with-at-least-32-random-bytes
 DEEPL_API_KEY=replace-me

@@ -2,14 +2,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { LanguagePref, useLanguage, useResolvedLanguage, useTranslation } from '../contexts/I18nContext';
 import { ThemeMode, useTheme } from '../contexts/ThemeContext';
 import { AuthProvider, deleteAccount, getAuthEmail, getAuthProvider, signOut } from '../services/auth';
 import { isPseudoTaken } from '../services/community';
 import { auth, db } from '../services/firebase';
 import { cancelAllScheduledNotificationsAsync, getNotificationPermissionsAsync, registerPushTokenAsync, requestNotificationPermissionsAsync, rescheduleInactivityReminderAsync, unregisterPushTokenAsync } from '../services/notifications';
-import { getSteamPlayerName, parseSteamInput } from '../services/steam';
+import { authenticateWithSteam } from '../services/steam';
 import { clearLocalUserData, loadData, removeData, saveData, USER_KEYS } from '../services/storage';
 
 export default function SettingsScreen() {
@@ -40,8 +40,6 @@ export default function SettingsScreen() {
   const [authEmail, setAuthEmail] = useState<string | null>(null);
   const [steamId, setSteamId] = useState<string | null>(null);
   const [steamName, setSteamName] = useState<string | null>(null);
-  const [steamModalVisible, setSteamModalVisible] = useState(false);
-  const [steamInput, setSteamInput] = useState('');
   const [steamLoading, setSteamLoading] = useState(false);
 
   useEffect(() => {
@@ -173,32 +171,20 @@ export default function SettingsScreen() {
   const pseudoDirty = pseudo.trim() !== savedPseudo && pseudo.trim().length > 0;
 
   const handleSteamConnect = async () => {
-    if (!steamInput.trim()) return;
     setSteamLoading(true);
     try {
-      const resolvedId = await parseSteamInput(steamInput);
-      if (!resolvedId) {
-        Alert.alert('', t.settingsSteamError);
-        setSteamLoading(false);
-        return;
-      }
-      const name = await getSteamPlayerName(resolvedId);
-      if (!name) {
-        Alert.alert('', t.settingsSteamError);
-        setSteamLoading(false);
-        return;
-      }
-      setSteamId(resolvedId);
-      setSteamName(name);
-      await saveData(USER_KEYS.steamId, { steamId: resolvedId, steamName: name });
-      setSteamModalVisible(false);
-      setSteamInput('');
+      const account = await authenticateWithSteam();
+      if (!account) return;
+      setSteamId(account.steamId);
+      setSteamName(account.steamName);
+      await saveData(USER_KEYS.steamId, account);
       Alert.alert('', t.settingsSteamSuccess);
     } catch (e: any) {
       console.error('[Settings] Steam connect error:', e?.message ?? e);
       Alert.alert('', t.settingsSteamError);
+    } finally {
+      setSteamLoading(false);
     }
-    setSteamLoading(false);
   };
 
   const handleSteamUnlink = () => {
@@ -325,9 +311,9 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
           ) : (
-            <TouchableOpacity style={styles.steamBtn} onPress={() => setSteamModalVisible(true)}>
+            <TouchableOpacity style={styles.steamBtn} onPress={handleSteamConnect} disabled={steamLoading}>
               <Ionicons name="logo-steam" size={20} color="#FFFFFF" />
-              <Text style={styles.steamBtnText}>{t.settingsSteamLink}</Text>
+              <Text style={styles.steamBtnText}>{steamLoading ? t.commonLoading : t.settingsSteamLink}</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -421,33 +407,6 @@ export default function SettingsScreen() {
         </View>
       </View>
 
-      {/* Steam Modal */}
-      <Modal visible={steamModalVisible} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Steam</Text>
-            <TextInput
-              style={styles.steamInput}
-              value={steamInput}
-              onChangeText={setSteamInput}
-              placeholder={t.settingsSteamIdPlaceholder}
-              placeholderTextColor={colors.textSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Text style={styles.steamHint}>{t.settingsSteamIdHint}</Text>
-            <View style={styles.modalBtns}>
-              <TouchableOpacity style={styles.modalCancelBtn} onPress={() => { setSteamModalVisible(false); setSteamInput(''); }}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalConnectBtn} onPress={handleSteamConnect} disabled={steamLoading}>
-                <Text style={styles.modalConnectText}>{steamLoading ? '...' : t.settingsSteamConnect}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       {/* À propos */}
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>{t.settingsAbout}</Text>
@@ -535,19 +494,4 @@ const makeStyles = (c: any) => StyleSheet.create({
     backgroundColor: '#1b2838', borderRadius: 12, paddingVertical: 12,
   },
   steamBtnText: { color: '#FFFFFF', fontWeight: '700', fontSize: 14 },
-  steamInput: {
-    backgroundColor: c.background, borderRadius: 12, padding: 14,
-    color: c.text, fontSize: 15, marginTop: 12,
-  },
-  steamHint: { color: c.textSecondary, fontSize: 11, marginTop: 8 },
-
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 24 },
-  modalCard: { backgroundColor: c.backgroundSecondary, borderRadius: 20, padding: 24, width: '100%' },
-  modalTitle: { color: c.text, fontSize: 20, fontWeight: '800', textAlign: 'center' },
-  modalBtns: { flexDirection: 'row', gap: 12, marginTop: 16 },
-  modalCancelBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: c.background },
-  modalCancelText: { color: c.textSecondary, fontWeight: '600' },
-  modalConnectBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: '#1b2838' },
-  modalConnectText: { color: '#FFFFFF', fontWeight: '700' },
 });

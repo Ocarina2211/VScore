@@ -4,6 +4,7 @@ interface WorkerEnv {
 	IGDB_CLIENT_ID: string;
 	IGDB_CLIENT_SECRET: string;
 	STEAM_API_KEY: string;
+	STEAM_AUTH_SECRET: string;
 	DEEPL_API_KEY: string;
 	FIREBASE_PROJECT_ID: string;
 }
@@ -11,6 +12,14 @@ interface WorkerEnv {
 const IGDB_BASE_URL = "https://api.igdb.com/v4";
 const TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token";
 const STEAM_BASE_URL = "https://api.steampowered.com";
+const STEAM_OPENID_URL = "https://steamcommunity.com/openid/login";
+const STEAM_OPENID_NAMESPACE = "http://specs.openid.net/auth/2.0";
+const STEAM_OPENID_IDENTIFIER = `${STEAM_OPENID_NAMESPACE}/identifier_select`;
+const STEAM_APP_REDIRECT_URL = "ratecade://steam-auth";
+const STEAM_AUTH_PUBLIC_ORIGIN = "https://ratecade-auth.web.app";
+const STEAM_AUTH_RETURN_URL = `${STEAM_AUTH_PUBLIC_ORIGIN}/steam-auth`;
+const STEAM_AUTH_STATE_TTL_SECONDS = 10 * 60;
+const STEAM_AUTH_RESULT_TTL_SECONDS = 2 * 60;
 const DEEPL_URL = "https://api-free.deepl.com/v2/translate";
 const IGDB_LIST_CACHE_SECONDS = 6 * 60 * 60;
 const IGDB_DETAIL_CACHE_SECONDS = 7 * 24 * 60 * 60;
@@ -25,6 +34,8 @@ const MIN_EXTERNAL_CRITIC_RATINGS = 5;
 const IGDB_CACHE_SCHEMA = "7";
 const FIREBASE_CERTIFICATES_URL =
 	"https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+const FIREBASE_CERTIFICATES_FALLBACK_URL =
+	"https://www.googleapis.com/service_accounts/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 const AUTH_RATE_LIMIT = 120;
 const AUTH_RATE_WINDOW_MS = 60_000;
 
@@ -83,13 +94,109 @@ function requireSecret(value: string | undefined, name: string): string {
 	return value;
 }
 
-async function fetchProvider(url: string | URL, init: RequestInit, provider: string): Promise<Response> {
+function base64UrlEncode(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value: string): Uint8Array {
+	if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new ApiError(400, "Invalid Steam authentication token.");
+	const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+	try {
+		return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+	} catch {
+		throw new ApiError(400, "Invalid Steam authentication token.");
+	}
+}
+
+type SteamAuthPurpose = "steam-auth-state" | "steam-auth-result";
+type SteamAuthPayload = {
+	v: 1;
+	purpose: SteamAuthPurpose;
+	uid: string;
+	exp: number;
+	nonce: string;
+	steamId?: string;
+};
+
+async function steamAuthKey(env: WorkerEnv): Promise<CryptoKey> {
+	const secret = requireSecret(env.STEAM_AUTH_SECRET, "STEAM_AUTH_SECRET");
+	const encodedSecret = new TextEncoder().encode(secret);
+	if (encodedSecret.byteLength < 32) throw new ApiError(503, "Server secret STEAM_AUTH_SECRET is too short.");
+	return crypto.subtle.importKey(
+		"raw",
+		encodedSecret,
+		{ name: "HMAC", hash: "SHA-256" },
+		false,
+		["sign", "verify"],
+	);
+}
+
+async function createSteamAuthToken(env: WorkerEnv, payload: SteamAuthPayload): Promise<string> {
+	const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+	const signature = await crypto.subtle.sign("HMAC", await steamAuthKey(env), new TextEncoder().encode(encodedPayload));
+	return `${encodedPayload}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+async function verifySteamAuthToken(
+	env: WorkerEnv,
+	token: string,
+	expectedPurpose: SteamAuthPurpose,
+): Promise<SteamAuthPayload> {
+	if (token.length > 2_048) throw new ApiError(400, "Invalid Steam authentication token.");
+	const parts = token.split(".");
+	if (parts.length !== 2) throw new ApiError(400, "Invalid Steam authentication token.");
+	const [encodedPayload, encodedSignature] = parts;
+	const validSignature = await crypto.subtle.verify(
+		"HMAC",
+		await steamAuthKey(env),
+		base64UrlDecode(encodedSignature),
+		new TextEncoder().encode(encodedPayload),
+	);
+	if (!validSignature) throw new ApiError(400, "Invalid Steam authentication token.");
+
+	let payload: Partial<SteamAuthPayload>;
+	try {
+		payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(encodedPayload)));
+	} catch {
+		throw new ApiError(400, "Invalid Steam authentication token.");
+	}
+	const now = Math.floor(Date.now() / 1_000);
+	if (
+		payload.v !== 1
+		|| payload.purpose !== expectedPurpose
+		|| typeof payload.uid !== "string"
+		|| payload.uid.length < 1
+		|| payload.uid.length > 128
+		|| typeof payload.exp !== "number"
+		|| payload.exp < now
+		|| payload.exp > now + STEAM_AUTH_STATE_TTL_SECONDS
+		|| typeof payload.nonce !== "string"
+		|| payload.nonce.length < 16
+	) {
+		throw new ApiError(400, "Expired or invalid Steam authentication token.");
+	}
+	return payload as SteamAuthPayload;
+}
+
+function randomSteamAuthNonce(): string {
+	return base64UrlEncode(crypto.getRandomValues(new Uint8Array(18)));
+}
+
+async function fetchProvider(
+	url: string | URL,
+	init: RequestInit,
+	provider: string,
+	redirect: "error" | "follow" | "manual" = "error",
+): Promise<Response> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
 	try {
-		return await fetch(url, { ...init, redirect: "error", signal: controller.signal });
+		return await fetch(url, { ...init, redirect, signal: controller.signal });
 	} catch (error) {
 		if (controller.signal.aborted) throw new ApiError(504, `${provider} timed out.`);
+		console.error(`${provider} fetch failed`, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
 		throw new ApiError(502, `${provider} is unreachable.`);
 	} finally {
 		clearTimeout(timeout);
@@ -103,19 +210,48 @@ function bearerToken(request: Request): string {
 	return match[1];
 }
 
-async function getFirebaseCertificates(): Promise<Record<string, string>> {
-	if (firebaseCertificates && firebaseCertificates.expiresAt > Date.now()) return firebaseCertificates.values;
+async function getFirebaseCertificates(forceRefresh = false): Promise<Record<string, string>> {
+	if (!forceRefresh && firebaseCertificates && firebaseCertificates.expiresAt > Date.now()) {
+		return firebaseCertificates.values;
+	}
 
-	const response = await fetchProvider(
-		FIREBASE_CERTIFICATES_URL,
-		{ headers: { Accept: "application/json" } },
-		"Firebase authentication",
-	);
-	if (!response.ok) throw new ApiError(503, "Authentication service unavailable.");
-	const values = (await response.json()) as Record<string, string>;
-	const maxAge = Number(response.headers.get("cache-control")?.match(/max-age=(\d+)/)?.[1] ?? 3600);
-	firebaseCertificates = { values, expiresAt: Date.now() + Math.max(60, maxAge) * 1000 };
-	return values;
+	const endpoints = [FIREBASE_CERTIFICATES_URL, FIREBASE_CERTIFICATES_FALLBACK_URL];
+	let lastError: unknown;
+	for (const endpoint of endpoints) {
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+			try {
+				const response = await fetch(endpoint, {
+					headers: { Accept: "application/json" },
+					redirect: "follow",
+					signal: controller.signal,
+				});
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				const values = (await response.json()) as Record<string, string>;
+				const validValues = Object.fromEntries(
+					Object.entries(values).filter(([key, certificate]) =>
+						key.length > 0
+						&& typeof certificate === "string"
+						&& certificate.includes("BEGIN CERTIFICATE")
+					),
+				);
+				if (Object.keys(validValues).length === 0) throw new Error("No certificates returned");
+				const maxAge = Number(response.headers.get("cache-control")?.match(/max-age=(\d+)/)?.[1] ?? 3600);
+				firebaseCertificates = {
+					values: validValues,
+					expiresAt: Date.now() + Math.max(60, maxAge) * 1000,
+				};
+				return validValues;
+			} catch (error) {
+				lastError = error;
+			} finally {
+				clearTimeout(timeout);
+			}
+		}
+	}
+	console.error("Firebase certificate download failed", lastError instanceof Error ? lastError.message : lastError);
+	throw new ApiError(503, "Authentication service temporarily unavailable. Please try again.");
 }
 
 async function authenticateFirebase(request: Request, env: WorkerEnv): Promise<string> {
@@ -126,7 +262,10 @@ async function authenticateFirebase(request: Request, env: WorkerEnv): Promise<s
 	try {
 		const header = decodeProtectedHeader(token);
 		if (header.alg !== "RS256" || !header.kid) throw new Error("Unsupported token header");
-		const certificate = (await getFirebaseCertificates())[header.kid];
+		let certificate = (await getFirebaseCertificates())[header.kid];
+		// Firebase rotates signing keys. An isolate can still hold the previous
+		// certificate set for a few minutes, so refresh once for an unknown `kid`.
+		if (!certificate) certificate = (await getFirebaseCertificates(true))[header.kid];
 		if (!certificate) throw new Error("Unknown signing key");
 		const key = await importX509(certificate, "RS256");
 		const { payload } = await jwtVerify(token, key, {
@@ -765,8 +904,165 @@ function readSteamId(url: URL): string {
 	return steamId;
 }
 
-async function handleSteam(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
+async function fetchSteamPlayer(env: WorkerEnv, steamId: string): Promise<Record<string, unknown> | null> {
+	const upstream = new URL(`${STEAM_BASE_URL}/ISteamUser/GetPlayerSummaries/v2/`);
+	upstream.searchParams.set("steamids", steamId);
+	upstream.searchParams.set("key", requireSecret(env.STEAM_API_KEY, "STEAM_API_KEY"));
+	const response = await fetchProvider(
+		upstream,
+		{ headers: { Accept: "application/json", "User-Agent": "Ratecade/2.0 Steam Web API" } },
+		"Steam",
+		"follow",
+	);
+	const data = await readJsonResponse(response, "Steam") as { response?: { players?: Array<Record<string, unknown>> } };
+	return data.response?.players?.[0] ?? null;
+}
+
+async function beginSteamAuthentication(env: WorkerEnv, url: URL, uid: string): Promise<Response> {
+	assertAllowedQueryParams(url, new Set());
+	const now = Math.floor(Date.now() / 1_000);
+	const state = await createSteamAuthToken(env, {
+		v: 1,
+		purpose: "steam-auth-state",
+		uid,
+		exp: now + STEAM_AUTH_STATE_TTL_SECONDS,
+		nonce: randomSteamAuthNonce(),
+	});
+	const returnTo = new URL(STEAM_AUTH_RETURN_URL);
+	returnTo.searchParams.set("state", state);
+
+	const authUrl = new URL(STEAM_OPENID_URL);
+	authUrl.searchParams.set("openid.ns", STEAM_OPENID_NAMESPACE);
+	authUrl.searchParams.set("openid.mode", "checkid_setup");
+	authUrl.searchParams.set("openid.return_to", returnTo.toString());
+	authUrl.searchParams.set("openid.realm", `${STEAM_AUTH_PUBLIC_ORIGIN}/`);
+	authUrl.searchParams.set("openid.identity", STEAM_OPENID_IDENTIFIER);
+	authUrl.searchParams.set("openid.claimed_id", STEAM_OPENID_IDENTIFIER);
+	return jsonResponse({ authUrl: authUrl.toString() }, 200, { "Cache-Control": "no-store" });
+}
+
+function steamAppRedirect(params: Record<string, string>): Response {
+	const redirect = new URL(STEAM_APP_REDIRECT_URL);
+	Object.entries(params).forEach(([key, value]) => redirect.searchParams.set(key, value));
+	return new Response(null, {
+		status: 302,
+		headers: {
+			Location: redirect.toString(),
+			"Cache-Control": "no-store",
+			"Referrer-Policy": "no-referrer",
+		},
+	});
+}
+
+function validSteamReturnTo(returnToValue: string, stateToken: string): boolean {
+	try {
+		const returnTo = new URL(returnToValue);
+		return returnTo.origin === STEAM_AUTH_PUBLIC_ORIGIN
+			&& returnTo.pathname === "/steam-auth"
+			&& returnTo.searchParams.get("state") === stateToken;
+	} catch {
+		return false;
+	}
+}
+
+async function verifySteamOpenIdAssertion(parameters: URLSearchParams): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+		try {
+			const response = await fetch(STEAM_OPENID_URL, {
+				method: "POST",
+				headers: {
+					Accept: "text/plain",
+					"Content-Type": "application/x-www-form-urlencoded",
+					"User-Agent": "Ratecade/2.0 Steam OpenID",
+				},
+				body: parameters.toString(),
+				redirect: "follow",
+				signal: controller.signal,
+			});
+			const body = await response.text();
+			if (!response.ok) throw new Error(`Steam OpenID HTTP ${response.status}`);
+			if (!/^is_valid\s*:\s*true\s*$/mi.test(body)) throw new Error("Steam OpenID returned is_valid:false");
+			return;
+		} catch (error) {
+			lastError = error;
+		} finally {
+			clearTimeout(timeout);
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error("Steam OpenID verification failed");
+}
+
+async function handleSteamAuthCallback(env: WorkerEnv, url: URL): Promise<Response> {
+	try {
+		const stateToken = url.searchParams.get("state") ?? "";
+		const state = await verifySteamAuthToken(env, stateToken, "steam-auth-state");
+		enforceUserRateLimit(state.uid);
+		if (url.searchParams.get("openid.mode") !== "id_res") {
+			console.warn("Steam authentication cancelled", url.searchParams.get("openid.mode") ?? "missing mode");
+			return steamAppRedirect({ error: "cancelled" });
+		}
+
+		const claimedId = url.searchParams.get("openid.claimed_id") ?? "";
+		const identity = url.searchParams.get("openid.identity") ?? "";
+		const steamId = claimedId.match(/^https:\/\/steamcommunity\.com\/openid\/id\/(\d{17})$/)?.[1];
+		if (
+			!steamId
+			|| identity !== claimedId
+			|| url.searchParams.get("openid.ns") !== STEAM_OPENID_NAMESPACE
+			|| url.searchParams.get("openid.op_endpoint") !== STEAM_OPENID_URL
+			|| !validSteamReturnTo(url.searchParams.get("openid.return_to") ?? "", stateToken)
+		) {
+			throw new ApiError(400, "Steam returned an invalid identity assertion.");
+		}
+
+		const verification = new URLSearchParams();
+		for (const [key, value] of url.searchParams) {
+			if (key.startsWith("openid.")) verification.set(key, value);
+		}
+		verification.set("openid.mode", "check_authentication");
+		await verifySteamOpenIdAssertion(verification);
+
+		const now = Math.floor(Date.now() / 1_000);
+		const resultToken = await createSteamAuthToken(env, {
+			v: 1,
+			purpose: "steam-auth-result",
+			uid: state.uid,
+			steamId,
+			exp: now + STEAM_AUTH_RESULT_TTL_SECONDS,
+			nonce: randomSteamAuthNonce(),
+		});
+		return steamAppRedirect({ token: resultToken });
+	} catch (error) {
+		console.error("Steam authentication callback failed", error instanceof Error ? error.message : error);
+		return steamAppRedirect({ error: "verification_failed" });
+	}
+}
+
+async function completeSteamAuthentication(env: WorkerEnv, url: URL, uid: string): Promise<Response> {
+	assertAllowedQueryParams(url, new Set(["token"]));
+	const result = await verifySteamAuthToken(env, url.searchParams.get("token") ?? "", "steam-auth-result");
+	if (result.uid !== uid || !result.steamId || !/^\d{17}$/.test(result.steamId)) {
+		throw new ApiError(403, "This Steam login belongs to another Ratecade account.");
+	}
+	let steamName: string | null = null;
+	try {
+		const player = await fetchSteamPlayer(env, result.steamId);
+		steamName = typeof player?.personaname === "string" ? player.personaname : null;
+	} catch (error) {
+		// OpenID has already verified the Steam ID. A temporary Web API failure
+		// must not invalidate or block that successful account connection.
+		console.warn("Steam profile lookup failed after successful OpenID", error instanceof Error ? error.message : error);
+	}
+	return jsonResponse({ steamId: result.steamId, steamName }, 200, { "Cache-Control": "no-store" });
+}
+
+async function handleSteam(request: Request, env: WorkerEnv, url: URL, uid: string): Promise<Response> {
 	if (request.method !== "GET") throw new ApiError(405, "Steam routes only accept GET.");
+	if (url.pathname === "/steam/auth/start") return beginSteamAuthentication(env, url, uid);
+	if (url.pathname === "/steam/auth/complete") return completeSteamAuthentication(env, url, uid);
 	let upstream: URL;
 
 	if (url.pathname === "/steam/resolve") {
@@ -791,7 +1087,12 @@ async function handleSteam(request: Request, env: WorkerEnv, url: URL): Promise<
 	}
 
 	upstream.searchParams.set("key", requireSecret(env.STEAM_API_KEY, "STEAM_API_KEY"));
-	const response = await fetchProvider(upstream, { headers: { Accept: "application/json" } }, "Steam");
+	const response = await fetchProvider(
+		upstream,
+		{ headers: { Accept: "application/json", "User-Agent": "Ratecade/2.0 Steam Web API" } },
+		"Steam",
+		"follow",
+	);
 	return jsonResponse(await readJsonResponse(response, "Steam"));
 }
 
@@ -839,15 +1140,22 @@ const worker = {
 
 		try {
 			if (url.pathname === "/health") return jsonResponse({ ok: true, service: "vscore-api" });
+			if (url.pathname === "/steam/auth/callback") {
+				if (request.method !== "GET") throw new ApiError(405, "Steam callback only accepts GET.");
+				return await handleSteamAuthCallback(env, url);
+			}
 			if (!isProtectedRoute(url.pathname)) throw new ApiError(404, "Route not found.");
 			const uid = await authenticateFirebase(request, env);
 			enforceUserRateLimit(uid);
 			if (url.pathname.startsWith("/igdb/")) return await handleIgdb(request, env, ctx, url);
-			if (url.pathname.startsWith("/steam/")) return await handleSteam(request, env, url);
+			if (url.pathname.startsWith("/steam/")) return await handleSteam(request, env, url, uid);
 			if (url.pathname === "/translate") return await handleTranslate(request, env);
 			throw new ApiError(404, "Route not found.");
 		} catch (error) {
-			if (error instanceof ApiError) return jsonResponse({ error: error.message }, error.status);
+			if (error instanceof ApiError) {
+				if (error.status >= 500) console.error("Worker request failed", url.pathname, error.status, error.message);
+				return jsonResponse({ error: error.message }, error.status);
+			}
 			console.error("Unhandled Worker error", error instanceof Error ? error.message : error);
 			return jsonResponse({ error: "Internal server error." }, 500);
 		}
