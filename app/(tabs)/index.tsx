@@ -2,8 +2,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, FlatList, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, FlatList, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import PressableCard from '../../components/PressableCard';
 import { getGameCover } from '../../constants/CustomCovers';
 import { useTranslation } from '../../contexts/I18nContext';
@@ -72,28 +72,76 @@ const SECTION_DEFS: SectionDef[] = [
 const STATIC_SECTIONS = new Set(['community', 'recommended', 'friends_liked']);
 
 function SkeletonCard({ colors }: { colors: any }) {
-  const shimmer = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const anim = Animated.loop(
-      Animated.timing(shimmer, { toValue: 1, duration: 1200, useNativeDriver: true })
-    );
-    anim.start();
-    return () => anim.stop();
-  }, [shimmer]);
-  const translateX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-130, 130] });
   return (
-    <View style={{ width: 130, height: 180, borderRadius: 14, overflow: 'hidden', backgroundColor: colors.backgroundSecondary, marginRight: 12 }}>
-      <Animated.View style={{ ...StyleSheet.absoluteFillObject, transform: [{ translateX }] }}>
-        <LinearGradient
-          colors={['transparent', 'rgba(255,255,255,0.15)', 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={{ flex: 1 }}
-        />
-      </Animated.View>
-    </View>
+    <View style={{ width: 130, height: 180, borderRadius: 14, backgroundColor: colors.backgroundSecondary, marginRight: 12 }} />
   );
 }
+
+type GameCardProps = {
+  item: any;
+  sectionId: string;
+  colors: any;
+  styles: any;
+  vscoreStat?: { avg: number; count: number };
+  meta?: number;
+  isRated: boolean;
+  ratedLabel: string;
+  onPressGame: (id: number) => void;
+};
+
+const GameCard = memo(function GameCard({
+  item,
+  sectionId,
+  colors,
+  styles,
+  vscoreStat,
+  meta,
+  isRated,
+  ratedLabel,
+  onPressGame,
+}: GameCardProps) {
+  const vscore = vscoreStat?.avg;
+  const isFriendsSection = sectionId === 'friends_liked';
+  const source = getGameCover(item.id, item.background_image);
+
+  return (
+    <PressableCard
+      style={[styles.card, isFriendsSection && styles.cardFriends]}
+      onPress={() => onPressGame(item.id)}
+    >
+      {source
+        ? <Image source={source} style={styles.cover} cachePolicy="memory-disk" recyclingKey={`${sectionId}-${item.id}`} />
+        : <View style={[styles.cover, styles.coverPlaceholder]}><Ionicons name="game-controller-outline" size={36} color={colors.textSecondary} /></View>}
+      <LinearGradient colors={['transparent', 'rgba(0,0,0,0.82)']} style={styles.cardGradient} />
+      {meta ? (
+        <View style={styles.metaBadge}>
+          <Text style={styles.metaText}>{meta}</Text>
+        </View>
+      ) : null}
+      {vscore != null && vscore > 0 && (
+        <View style={styles.vscoreBadge}>
+          <Text style={styles.vscoreText}>★ {vscore.toFixed(1)}</Text>
+        </View>
+      )}
+      {isRated && (
+        <View style={styles.ratedBadge}>
+          <Ionicons name="star" size={10} color="#FFD700" />
+          <Text style={styles.ratedBadgeText}>{ratedLabel}</Text>
+        </View>
+      )}
+      <Text style={styles.cardName} numberOfLines={2}>{item.name}</Text>
+      {isFriendsSection && item.likedByPseudos && item.likedByPseudos.length > 0 && (
+        <View style={styles.friendsLikedBadge}>
+          <Ionicons name="heart" size={9} color="#FF6B8A" />
+          <Text style={styles.friendsLikedText} numberOfLines={1}>
+            {item.likedByPseudos.slice(0, 2).join(', ')}
+            {item.likedByPseudos.length > 2 ? ` +${item.likedByPseudos.length - 2}` : ''}
+          </Text>
+        </View>
+      )}
+    </PressableCard>
+  );
+});
 
 export default function HomeScreen() {
   const colors = useColors();
@@ -137,38 +185,44 @@ export default function HomeScreen() {
   const loadedRef = useRef<Set<string>>(new Set());
   const nextPageRef = useRef<Record<string, number | null>>({});
   const loadingMoreRef = useRef<Set<string>>(new Set());
+  const pendingStatsGamesRef = useRef<Map<string, any>>(new Map());
+  const statsFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const filterRequestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recommendedRatingsSignatureRef = useRef('');
   const filterVersionRef = useRef(0);
   const activeFiltersRef = useRef({ genre: '', platform: 0, tag: '', recent: false });
   const loadSectionRef = useRef<(def: SectionDef) => void>(() => {});
   const router = useRouter();
+  const onPressGame = useCallback((id: number) => {
+    router.push(`/game/${id}` as any);
+  }, [router]);
 
   useFocusEffect(
     useCallback(() => {
       loadData(USER_KEYS.ratings).then((ratings: any[]) => {
-        setRatedGames(Array.isArray(ratings) ? ratings : []);
-        const signature = JSON.stringify((ratings ?? []).map((rating: any) => [
+        const nextRatings = Array.isArray(ratings) ? ratings : [];
+        const signature = JSON.stringify(nextRatings.map((rating: any) => [
           rating.id,
           rating.general,
           rating.graphics,
           rating.gameplay,
           rating._updatedAt,
         ]));
-        if (signature !== recommendedRatingsSignatureRef.current || !loadedRef.current.has('recommended')) {
-          recommendedRatingsSignatureRef.current = signature;
+        const previousSignature = recommendedRatingsSignatureRef.current;
+        const ratingsChanged = previousSignature.length > 0 && signature !== previousSignature;
+        if (signature !== previousSignature) setRatedGames(nextRatings);
+        recommendedRatingsSignatureRef.current = signature;
+        if (ratingsChanged || !loadedRef.current.has('recommended')) {
           const recoDef = SECTION_DEFS.find((d) => d.id === 'recommended');
           if (recoDef) {
-            loadedRef.current.delete('recommended');
+            if (ratingsChanged) loadedRef.current.delete('recommended');
             loadSectionRef.current(recoDef);
           }
         }
       });
-      // Reload friends section on every focus (data changes as friends rate new games)
-      const friendsDef = SECTION_DEFS.find((d) => d.id === 'friends_liked');
-      if (friendsDef) {
-        loadedRef.current.delete('friends_liked');
-        loadSectionRef.current(friendsDef);
-      }
+      // Keep the friends section cached when returning from a game. Re-fetching
+      // here makes the row flash its skeleton every time Discover regains focus.
+      // It is loaded on the initial Discover mount together with the first rows.
     }, [])
   );
 
@@ -178,6 +232,8 @@ export default function HomeScreen() {
   useEffect(() => {
     return () => {
       if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      if (statsFlushTimerRef.current) clearTimeout(statsFlushTimerRef.current);
+      if (filterRequestTimerRef.current) clearTimeout(filterRequestTimerRef.current);
     };
   }, []);
 
@@ -226,6 +282,25 @@ export default function HomeScreen() {
     if (Object.keys(updates).length > 0) setMetacriticCacheMap((prev) => ({ ...prev, ...updates }));
   }, []);
 
+  const queueGameStats = useCallback((games: any[]) => {
+    games.forEach((game) => {
+      if (!Number.isSafeInteger(game?.id)) return;
+      pendingStatsGamesRef.current.set(`${game.id}:${normalizeGameName(game.name)}`, game);
+    });
+    if (statsFlushTimerRef.current || pendingStatsGamesRef.current.size === 0) return;
+
+    statsFlushTimerRef.current = setTimeout(() => {
+      const batch = [...pendingStatsGamesRef.current.values()];
+      pendingStatsGamesRef.current.clear();
+      statsFlushTimerRef.current = null;
+      void fetchBatchGameStats(batch).then((stats) => {
+        if (Object.keys(stats).length > 0) {
+          setGameStatsMap((prev) => ({ ...prev, ...stats }));
+        }
+      });
+    }, 150);
+  }, []);
+
   // Fetches filtered results for a single section using the current filter state from ref.
   // Called when a section first loads while filters are already active.
   const fetchFilteredForSection = useCallback(async (def: SectionDef) => {
@@ -253,9 +328,7 @@ export default function HomeScreen() {
       });
       if (version !== filterVersionRef.current) return;
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: data.results }));
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
     } catch {
       if (version !== filterVersionRef.current) return;
       setFilteredGamesMap((prev) => ({ ...prev, [def.id]: [] }));
@@ -264,7 +337,7 @@ export default function HomeScreen() {
         setFilterLoadingMap((prev) => ({ ...prev, [def.id]: false }));
       }
     }
-  }, []);
+  }, [queueGameStats]);
 
   const loadSection = useCallback(async (def: SectionDef) => {
     if (loadedRef.current.has(def.id)) return;
@@ -275,6 +348,21 @@ export default function HomeScreen() {
 
     if (def.id === 'community') {
       const communityGames = await fetchCommunityTopRated(1, 20);
+      const communityStats = Object.fromEntries(
+        communityGames.map((game) => [game.gameId, { avg: game.avgGeneral ?? game.avgScore ?? 0, count: game.count ?? 0 }])
+      );
+      setGameStatsMap((prev) => ({ ...prev, ...communityStats }));
+      nextPageRef.current['community'] = null;
+
+      // The Firestore response already contains everything needed to render a
+      // useful card. Do not block the row while resolving canonical catalog IDs.
+      updateSection('community', {
+        games: communityGames.map((game) => ({ ...game, id: game.gameId })),
+        loading: false,
+      });
+
+      // Enrich in the background so navigation uses canonical catalog IDs when
+      // the catalog service is available, without flashing the skeleton again.
       const resolvedByName = await resolveGamesByNames(communityGames.map((game) => game.name))
         .catch(() => new Map<string, any>());
       const games = communityGames.map((communityGame) => {
@@ -283,12 +371,11 @@ export default function HomeScreen() {
           ? { ...catalogGame, ...communityGame, id: catalogGame.id, background_image: catalogGame.background_image || communityGame.background_image }
           : { ...communityGame, id: communityGame.gameId };
       });
-      const communityStats = Object.fromEntries(
+      const enrichedStats = Object.fromEntries(
         games.map((game) => [game.id, { avg: game.avgGeneral ?? game.avgScore ?? 0, count: game.count ?? 0 }])
       );
-      setGameStatsMap((prev) => ({ ...prev, ...communityStats }));
-      nextPageRef.current['community'] = null;
-      updateSection('community', { games, loading: false });
+      setGameStatsMap((prev) => ({ ...prev, ...enrichedStats }));
+      updateSection('community', { games });
       return;
     }
 
@@ -301,13 +388,6 @@ export default function HomeScreen() {
     }
 
     if (def.id === 'friends_liked') {
-      // Check if user has friends before loading games
-      const { getFriends } = await import('../../services/community');
-      const friends = await getFriends();
-      if (!friends || friends.length === 0) {
-        updateSection('friends_liked', { games: [], loading: false });
-        return;
-      }
       const { getFriendsTopGames } = await import('../../services/community');
       const friendGames = await getFriendsTopGames();
       const resolvedByName = await resolveGamesByNames(friendGames.map((game) => game.name))
@@ -331,9 +411,7 @@ export default function HomeScreen() {
       updateSection('trending', { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
       return;
     }
 
@@ -343,48 +421,36 @@ export default function HomeScreen() {
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
     } else if (def.tag) {
       const data = await fetchGamesByTag(def.tag, 1, 20);
       nextPageRef.current[def.id] = data.nextPage;
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
     } else if (def.id === 'recent') {
       const data = await fetchRecentGames(1, 20);
       nextPageRef.current[def.id] = data.nextPage;
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
     } else {
       const data = await fetchGames(1, '', def.ordering, false, 20);
       nextPageRef.current[def.id] = data.nextPage;
       updateSection(def.id, { games: data.results, loading: false });
       cacheMetacritics(data.results);
       fetchFilteredForSection(def);
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
     }
     } catch (error) {
       console.warn(`[Home] Failed to load section ${def.id}:`, error instanceof Error ? error.message : error);
       loadedRef.current.delete(def.id);
       updateSection(def.id, { games: [], loading: false, loadingMore: false });
     }
-  }, [updateSection, fetchFilteredForSection, cacheMetacritics]);
+  }, [updateSection, fetchFilteredForSection, cacheMetacritics, queueGameStats]);
   loadSectionRef.current = loadSection;
-
-  useEffect(() => {
-    SECTION_DEFS.slice(0, 5).forEach((def) => loadSection(def));
-  }, [loadSection]);
 
   // Keep activeFiltersRef in sync so fetchFilteredForSection can read current values
   useEffect(() => {
@@ -395,57 +461,60 @@ export default function HomeScreen() {
 
   // When filters change, re-fetch each loaded section server-side with combined params
   useEffect(() => {
+    filterVersionRef.current += 1;
+    const version = filterVersionRef.current;
+    let active = true;
+    if (filterRequestTimerRef.current) clearTimeout(filterRequestTimerRef.current);
+
     if (!hasFilters) {
       setFilteredGamesMap({});
       setFilterLoadingMap({});
-      return;
+      return () => { active = false; };
     }
-
-    filterVersionRef.current += 1;
-    const version = filterVersionRef.current;
 
     const today = new Date().toISOString().split('T')[0];
     const recentSince = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dates = activeRecent ? `${recentSince},${today}` : '';
 
-    const loadingInit: Record<string, boolean> = {};
-    SECTION_DEFS.forEach((def) => {
-      if (!STATIC_SECTIONS.has(def.id) && loadedRef.current.has(def.id)) {
-        loadingInit[def.id] = true;
-      }
-    });
+    const loadedDefs = SECTION_DEFS.filter((def) => !STATIC_SECTIONS.has(def.id) && loadedRef.current.has(def.id));
+    const loadingInit = Object.fromEntries(loadedDefs.map((def) => [def.id, true]));
     setFilterLoadingMap(loadingInit);
 
-    SECTION_DEFS.forEach(async (def) => {
-      if (STATIC_SECTIONS.has(def.id)) return; // handled client-side
-      if (!loadedRef.current.has(def.id)) return;
-
-      // Section's own genre wins; filter genre applied to generic sections only
-      const genreSlug = def.genre ?? activeGenre;
-      // Section's own tag wins; filter tag applied when section has no tag
-      const tagSlug = def.tag ?? activeTag;
-
-      try {
-        const data = await fetchGamesFiltered({
-          genreSlug: genreSlug || '',
-          tagSlug: tagSlug || '',
-          platformId: activePlatform,
-          dates,
-          ordering: def.ordering || '-metacritic',
-          page: 1,
-          pageSize: 20,
-        });
-        if (version !== filterVersionRef.current) return;
-        setFilteredGamesMap((prev) => ({ ...prev, [def.id]: data.results }));
-      } catch {
-        if (version !== filterVersionRef.current) return;
-        setFilteredGamesMap((prev) => ({ ...prev, [def.id]: [] }));
-      } finally {
-        if (version === filterVersionRef.current) {
-          setFilterLoadingMap((prev) => ({ ...prev, [def.id]: false }));
+    // A quick filter change should produce one request batch and one state
+    // commit, not a separate render for every section and every tap.
+    filterRequestTimerRef.current = setTimeout(() => {
+      void Promise.all(loadedDefs.map(async (def) => {
+        // Section's own genre/tag wins over the generic filter.
+        const genreSlug = def.genre ?? activeGenre;
+        const tagSlug = def.tag ?? activeTag;
+        try {
+          const data = await fetchGamesFiltered({
+            genreSlug: genreSlug || '',
+            tagSlug: tagSlug || '',
+            platformId: activePlatform,
+            dates,
+            ordering: def.ordering || '-metacritic',
+            page: 1,
+            pageSize: 20,
+          });
+          return [def.id, data.results] as const;
+        } catch {
+          return [def.id, []] as const;
         }
+      })).then((entries) => {
+        if (!active || version !== filterVersionRef.current) return;
+        setFilteredGamesMap((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+        setFilterLoadingMap({});
+      });
+    }, 120);
+
+    return () => {
+      active = false;
+      if (filterRequestTimerRef.current) {
+        clearTimeout(filterRequestTimerRef.current);
+        filterRequestTimerRef.current = null;
       }
-    });
+    };
   }, [activeGenre, activePlatform, activeTag, activeRecent, hasFilters]);
 
   const toggleChip = (type: 'genre' | 'platform' | 'tag' | 'recent', value?: string | number) => {
@@ -495,9 +564,7 @@ export default function HomeScreen() {
         data = await fetchGames(currentNextPage, '', def.ordering, false, 20);
       }
       nextPageRef.current[sectionId] = data.nextPage;
-      fetchBatchGameStats(data.results).then((stats) =>
-        setGameStatsMap((prev) => ({ ...prev, ...stats }))
-      );
+      queueGameStats(data.results);
       setSections((prev) =>
         prev.map((s) =>
           s.id === sectionId
@@ -511,7 +578,7 @@ export default function HomeScreen() {
     } finally {
       loadingMoreRef.current.delete(sectionId);
     }
-  }, [hasFilters, updateSection]);
+  }, [hasFilters, updateSection, queueGameStats]);
 
   const onViewableItemsChanged = useRef(({ viewableItems }: any) => {
     viewableItems.forEach(({ item }: { item: Section }) => {
@@ -589,52 +656,31 @@ export default function HomeScreen() {
               }
               renderItem={({ item }) => {
                 const vscoreStat = gameStatsMap[item.id];
-                const vscore = vscoreStat?.avg;
                 const meta = item.metacritic ?? metacriticCacheMap[item.id];
                 const isRated = isRatedGame(item);
-                const isFriendsSection = section.id === 'friends_liked';
                 return (
-                  <PressableCard
-                    style={[styles.card, isFriendsSection && styles.cardFriends]}
-                    onPress={() => router.push(`/game/${item.id}` as any)}
-                  >
-                    {(() => { const src = getGameCover(item.id, item.background_image); return src ? <Image source={src} style={styles.cover} /> : <View style={[styles.cover, styles.coverPlaceholder]}><Ionicons name="game-controller-outline" size={36} color={colors.textSecondary} /></View>; })()}
-                    <LinearGradient colors={['transparent', 'rgba(0,0,0,0.82)']} style={styles.cardGradient} />
-                    {meta ? (
-                      <View style={styles.metaBadge}>
-                        <Text style={styles.metaText}>{meta}</Text>
-                      </View>
-                    ) : null}
-                    {vscore != null && vscore > 0 && (
-                      <View style={styles.vscoreBadge}>
-                        <Text style={styles.vscoreText}>★ {vscore.toFixed(1)}</Text>
-                      </View>
-                    )}
-                    {isRated && (
-                      <View style={styles.ratedBadge}>
-                        <Ionicons name="star" size={10} color="#FFD700" />
-                        <Text style={styles.ratedBadgeText}>{t.ratedBadgeLabel}</Text>
-                      </View>
-                    )}
-                    <Text style={styles.cardName} numberOfLines={2}>{item.name}</Text>
-                    {isFriendsSection && item.likedByPseudos && item.likedByPseudos.length > 0 && (
-                      <View style={styles.friendsLikedBadge}>
-                        <Ionicons name="heart" size={9} color="#FF6B8A" />
-                        <Text style={styles.friendsLikedText} numberOfLines={1}>
-                          {item.likedByPseudos.slice(0, 2).join(', ')}
-                          {item.likedByPseudos.length > 2 ? ` +${item.likedByPseudos.length - 2}` : ''}
-                        </Text>
-                      </View>
-                    )}
-                  </PressableCard>
+                  <GameCard
+                    item={item}
+                    sectionId={section.id}
+                    colors={colors}
+                    styles={styles}
+                    vscoreStat={vscoreStat}
+                    meta={meta}
+                    isRated={isRated}
+                    ratedLabel={t.ratedBadgeLabel}
+                    onPressGame={onPressGame}
+                  />
                 );
               }}
+              initialNumToRender={4}
+              maxToRenderPerBatch={4}
+              windowSize={3}
             />
           </View>
         )}
       </View>
     );
-  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, isRatedGame, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap, loadMoreInSection, router]);
+  }, [styles, colors, gameStatsMap, metacriticCacheMap, t, isRatedGame, hideRated, activeGenre, activePlatform, activeTag, activeRecent, hasFilters, filteredGamesMap, filterLoadingMap, loadMoreInSection, onPressGame]);
 
   const searchBar = (
     <View style={styles.searchBar}>
@@ -707,7 +753,7 @@ export default function HomeScreen() {
     const metaColor = meta >= 75 ? '#6FCF97' : meta >= 50 ? '#F39C12' : '#E74C3C';
     return (
       <TouchableOpacity style={styles.gridCard} onPress={() => router.push(`/game/${item.id}` as any)} activeOpacity={0.85}>
-        {(() => { const src = getGameCover(item.id, item.background_image); return src ? <Image source={src} style={styles.gridCover} /> : <View style={[styles.gridCover, styles.coverPlaceholder]}><Ionicons name="game-controller-outline" size={36} color={colors.textSecondary} /></View>; })()}
+        {(() => { const src = getGameCover(item.id, item.background_image); return src ? <Image source={src} style={styles.gridCover} cachePolicy="memory-disk" recyclingKey={`search-${item.id}`} /> : <View style={[styles.gridCover, styles.coverPlaceholder]}><Ionicons name="game-controller-outline" size={36} color={colors.textSecondary} /></View>; })()}
         <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.gridGradient} />
         {meta ? (
           <View style={[styles.gridMetaBadge, { backgroundColor: metaColor }]}>
@@ -755,6 +801,9 @@ export default function HomeScreen() {
             showsVerticalScrollIndicator={false}
             ListHeaderComponent={filterChips}
             renderItem={renderSearchCard}
+            initialNumToRender={6}
+            maxToRenderPerBatch={6}
+            windowSize={5}
           />
         )}
       </View>
@@ -779,7 +828,9 @@ export default function HomeScreen() {
         contentContainerStyle={{ paddingBottom: 120 }}
         onViewableItemsChanged={onViewableItemsChanged}
         viewabilityConfig={viewabilityConfig}
-        removeClippedSubviews={false}
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        windowSize={5}
         ListHeaderComponent={
           <>
             {ratedGames.length > 0 && (

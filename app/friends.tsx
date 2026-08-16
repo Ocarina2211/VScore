@@ -3,10 +3,10 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    FlatList,
     Image,
     Platform,
     RefreshControl,
-    ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
@@ -22,11 +22,9 @@ import {
     acceptFriendRequest,
     cancelFriendRequest,
     declineFriendRequest,
-    getFriends,
+    getFriendOverview,
     getFriendsFeed,
     getGlobalLeaderboard,
-    getReceivedRequests,
-    getSentRequests,
     removeFriend,
     type FeedItem,
     type FriendRequest,
@@ -35,6 +33,10 @@ import {
 } from '../services/community';
 
 type Tab = 'friends' | 'sent' | 'received' | 'ranking' | 'feed';
+type LoadGroup = 'relations' | 'ranking' | 'feed';
+
+const loadGroupForTab = (tab: Tab): LoadGroup =>
+  tab === 'ranking' ? 'ranking' : tab === 'feed' ? 'feed' : 'relations';
 
 type FriendsScreenProps = {
   asTab?: boolean;
@@ -67,47 +69,52 @@ export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
   const [addFriendModalVisible, setAddFriendModalVisible] = useState(false);
   const [actionRequestId, setActionRequestId] = useState<string | null>(null);
 
-  const lastLoadRef = useRef(0);
+  const lastLoadRef = useRef<Record<LoadGroup, number>>({ relations: 0, ranking: 0, feed: 0 });
   const loadRequestRef = useRef(0);
 
   const loadAll = useCallback(async () => {
     const requestId = ++loadRequestRef.current;
     const ownerUid = auth.currentUser?.uid ?? null;
+    const loadGroup = loadGroupForTab(activeTab);
     setLoading(true);
     setLoadError(false);
     try {
-      const [f, s, r, lb, fd] = await Promise.all([
-        getFriends(),
-        getSentRequests(),
-        getReceivedRequests(),
-        getGlobalLeaderboard(),
-        getFriendsFeed(),
-      ]);
+      const result = loadGroup === 'relations'
+        ? await getFriendOverview()
+        : loadGroup === 'ranking'
+        ? await getGlobalLeaderboard()
+        : await getFriendsFeed();
       if (loadRequestRef.current === requestId && auth.currentUser?.uid === ownerUid) {
-        setFriends(f);
-        setSent(s);
-        setReceived(r);
-        setLeaderboard(lb);
-        setFeed(fd);
-        lastLoadRef.current = Date.now();
+        if (loadGroup === 'relations') {
+          const overview = result as Awaited<ReturnType<typeof getFriendOverview>>;
+          setFriends(overview.friends);
+          setSent(overview.sent);
+          setReceived(overview.received);
+        } else if (loadGroup === 'ranking') {
+          setLeaderboard(result as PublicProfile[]);
+        } else {
+          setFeed(result as FeedItem[]);
+        }
+        lastLoadRef.current[loadGroup] = Date.now();
       }
     } catch {
       if (loadRequestRef.current === requestId) setLoadError(true);
     } finally {
       if (loadRequestRef.current === requestId) setLoading(false);
     }
-  }, []);
+  }, [activeTab]);
 
   useFocusEffect(
     useCallback(() => {
       // Re-fetch at most once every 2 minutes; pull-to-refresh bypasses this
-      if (Date.now() - lastLoadRef.current > 2 * 60 * 1000) {
+      const loadGroup = loadGroupForTab(activeTab);
+      if (Date.now() - lastLoadRef.current[loadGroup] > 2 * 60 * 1000) {
         void loadAll();
       }
       return () => {
         loadRequestRef.current += 1;
       };
-    }, [loadAll])
+    }, [activeTab, loadAll])
   );
 
   const onRefresh = async () => {
@@ -289,6 +296,18 @@ export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
       ? t.friendsNoSent
       : t.friendsNoReceived;
 
+  const rankingPlayers = useMemo(() => {
+    if (rankingMode === 'global') return leaderboard;
+    const myProfile = leaderboard.find((profile) => profile.uid === auth.currentUser?.uid);
+    const friendProfiles = friends
+      .map((friend) => friend.profile)
+      .filter((profile): profile is PublicProfile => !!profile);
+    return [
+      ...(myProfile ? [myProfile] : []),
+      ...friendProfiles,
+    ].sort((a, b) => (b.xp ?? 0) - (a.xp ?? 0));
+  }, [friends, leaderboard, rankingMode]);
+
   const contentPaddingBottom = asTab ? 140 : 100;
 
   return (
@@ -370,7 +389,11 @@ export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
           </TouchableOpacity>
         </View>
       ) : activeTab !== 'ranking' && activeTab !== 'feed' ? (
-        <ScrollView
+        <FlatList
+          style={{ flex: 1 }}
+          data={currentList}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => renderProfile(item)}
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl
@@ -379,82 +402,68 @@ export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
               tintColor={colors.primary}
             />
           }
-        >
-          {currentList.length === 0 ? (
-            <Text style={styles.emptyText}>{emptyLabel}</Text>
-          ) : (
-            currentList.map((req) => renderProfile(req))
-          )}
-        </ScrollView>
+          ListEmptyComponent={<Text style={styles.emptyText}>{emptyLabel}</Text>}
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+        />
       ) : null}
 
       {/* Ranking tab */}
       {!loading && activeTab === 'ranking' && (
-        <ScrollView
+        <FlatList
+          style={{ flex: 1 }}
+          data={rankingPlayers}
+          keyExtractor={(item) => item.uid}
+          renderItem={({ item, index }) => renderLeaderboardRow(item, index)}
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
           }
-        >
-          {/* Toggle global / friends */}
-          <View style={styles.rankingToggle}>
-            <TouchableOpacity
-              style={[styles.rankingToggleBtn, rankingMode === 'global' && styles.rankingToggleBtnActive]}
-              onPress={() => setRankingMode('global')}
-            >
-              <Text style={[styles.rankingToggleText, rankingMode === 'global' && styles.rankingToggleTextActive]}>
-                🌍 {t.friendsRankingGlobal}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.rankingToggleBtn, rankingMode === 'friends' && styles.rankingToggleBtnActive]}
-              onPress={() => setRankingMode('friends')}
-            >
-              <Text style={[styles.rankingToggleText, rankingMode === 'friends' && styles.rankingToggleTextActive]}>
-                👥 {t.friendsRankingFriends}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {rankingMode === 'global' ? (
-            leaderboard.length === 0 ? (
-              <Text style={styles.emptyText}>{t.friendsRankingEmpty}</Text>
-            ) : (
-              leaderboard.map((player, i) => renderLeaderboardRow(player, i))
-            )
-          ) : (() => {
-            const myProfile = leaderboard.find((p) => p.uid === auth.currentUser?.uid);
-            const friendProfiles: PublicProfile[] = friends
-              .map((f) => f.profile)
-              .filter((p): p is PublicProfile => !!p);
-            const allInRanking = [
-              ...(myProfile ? [myProfile] : []),
-              ...friendProfiles,
-            ].sort((a, b) => (b.xp ?? 0) - (a.xp ?? 0));
-            return allInRanking.length === 0 ? (
-              <Text style={styles.emptyText}>{t.friendsRankingNoFriends}</Text>
-            ) : (
-              allInRanking.map((player, i) => renderLeaderboardRow(player, i))
-            );
-          })()}
-        </ScrollView>
+          ListHeaderComponent={(
+            <View style={styles.rankingToggle}>
+              <TouchableOpacity
+                style={[styles.rankingToggleBtn, rankingMode === 'global' && styles.rankingToggleBtnActive]}
+                onPress={() => setRankingMode('global')}
+              >
+                <Text style={[styles.rankingToggleText, rankingMode === 'global' && styles.rankingToggleTextActive]}>
+                  🌍 {t.friendsRankingGlobal}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.rankingToggleBtn, rankingMode === 'friends' && styles.rankingToggleBtnActive]}
+                onPress={() => setRankingMode('friends')}
+              >
+                <Text style={[styles.rankingToggleText, rankingMode === 'friends' && styles.rankingToggleTextActive]}>
+                  👥 {t.friendsRankingFriends}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          ListEmptyComponent={(
+            <Text style={styles.emptyText}>
+              {rankingMode === 'global' ? t.friendsRankingEmpty : t.friendsRankingNoFriends}
+            </Text>
+          )}
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+        />
       )}
 
       {/* Feed tab */}
       {!loading && activeTab === 'feed' && (
-        <ScrollView
+        <FlatList
+          style={{ flex: 1 }}
+          data={feed}
+          keyExtractor={(item, index) => `${item.uid}-${item.gameId}-${index}`}
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: contentPaddingBottom, paddingTop: 8 }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
           }
-        >
-          {feed.length === 0 ? (
-            <Text style={styles.emptyText}>{t.friendsFeedEmpty}</Text>
-          ) : (
-            feed.map((item, i) => {
-              return (
+          ListEmptyComponent={<Text style={styles.emptyText}>{t.friendsFeedEmpty}</Text>}
+          renderItem={({ item }) => (
                 <TouchableOpacity
-                  key={`${item.uid}-${item.gameId}-${i}`}
                   style={styles.feedCard}
                   activeOpacity={0.85}
                   onPress={() => setSelectedUid(item.uid)}
@@ -494,10 +503,11 @@ export default function FriendsScreen({ asTab = false }: FriendsScreenProps) {
                     )}
                   </View>
                 </TouchableOpacity>
-              );
-            })
           )}
-        </ScrollView>
+          initialNumToRender={8}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+        />
       )}
 
       <UserProfileModal

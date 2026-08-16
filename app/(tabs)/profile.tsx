@@ -1,18 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as ImageManipulator from 'expo-image-manipulator';
-import * as ImagePicker from 'expo-image-picker';
+import { useIsFocused } from '@react-navigation/native';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
-import * as Sharing from 'expo-sharing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
-import { captureRef } from 'react-native-view-shot';
+import { Alert, Modal, Platform, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import RankModal from '../../components/RankModal';
 import { getNextRank, getRank } from '../../constants/Games';
 import { useTranslation } from '../../contexts/I18nContext';
 import { useColors } from '../../contexts/ThemeContext';
-import { isPseudoTaken, syncListsFromFirestore, syncProfileFromFirestore, syncPublicProfile, syncRatingsFromFirestore } from '../../services/community';
+import { isPseudoTaken, syncAllUserDataFromFirestore, syncPublicProfile } from '../../services/community';
 import { auth } from '../../services/firebase';
 import { fetchGames } from '../../services/games';
 import { createGameIdentityMatcher, normalizeGameName } from '../../services/gameIdentity';
@@ -25,6 +23,13 @@ import { loadData, removeData, saveData, USER_KEYS } from '../../services/storag
 const BUCKET_COLORS = ['#E74C3C', '#E67E22', '#F1C40F', '#2ECC71', '#00C853'];
 
 export default function ProfileScreen() {
+  const isFocused = useIsFocused();
+  const hasBeenFocusedRef = useRef(isFocused);
+  if (isFocused) hasBeenFocusedRef.current = true;
+  return hasBeenFocusedRef.current ? <ProfileScreenContent /> : null;
+}
+
+function ProfileScreenContent() {
   const colors = useColors();
   const t = useTranslation();
   const insets = useSafeAreaInsets();
@@ -35,6 +40,7 @@ export default function ProfileScreen() {
   const [top3, setTop3] = useState<any[]>([]);
   const [ratingQuery, setRatingQuery] = useState('');
   const [sortKey, setSortKey] = useState<'date' | 'score' | 'meta' | 'title'>('date');
+  const [visibleRatingsCount, setVisibleRatingsCount] = useState(20);
   const [rankModalVisible, setRankModalVisible] = useState(false);
   const [pseudo, setPseudo] = useState('PSEUDO');
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
@@ -47,104 +53,134 @@ export default function ProfileScreen() {
   const [sharingImage, setSharingImage] = useState(false);
   const shareCardRef = useRef<View>(null);
   const profileLoadedRef = useRef(false);
-  const restoreRequestRef = useRef(0);
+  const profileLoadedUidRef = useRef<string | null>(null);
+  const profileLoadPromiseRef = useRef<Promise<void> | null>(null);
+  const lastProfileLoadAtRef = useRef(0);
   const profileSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const publicSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [steamGames, setSteamGames] = useState<SteamGame[]>([]);
   const [steamExpanded, setSteamExpanded] = useState(false);
   const [steamLoading, setSteamLoading] = useState(false);
   const [steamLinked, setSteamLinked] = useState(false);
   const [steamLoadError, setSteamLoadError] = useState(false);
+  const steamLibraryLoadedRef = useRef(false);
+  const steamIdRef = useRef<string | null>(null);
   const router = useRouter();
 
   // Version hybride : local + Firestore (restauration de l'ancien comportement)
-  const loadProfileData = useCallback(async () => {
-    try {
-      profileLoadedRef.current = false;
-      const user = auth.currentUser;
-      const expectedUid = user?.uid ?? null;
-      if (user && !user.isAnonymous) {
-        await Promise.all([
-          syncProfileFromFirestore(),
-          syncRatingsFromFirestore(),
-          syncListsFromFirestore(),
+  const loadProfileData = useCallback(() => {
+    if (profileLoadPromiseRef.current) return profileLoadPromiseRef.current;
+    const task = (async () => {
+      try {
+        profileLoadedRef.current = false;
+        const user = auth.currentUser;
+        const expectedUid = user?.uid ?? null;
+        if (user && !user.isAnonymous) {
+          const lastCloudSyncAt = Number(await loadData(USER_KEYS.lastCloudSyncAt) ?? 0);
+          if (Date.now() - lastCloudSyncAt > 2 * 60 * 1000) {
+            if (await syncAllUserDataFromFirestore()) {
+              await saveData(USER_KEYS.lastCloudSyncAt, Date.now());
+            }
+          }
+        }
+        if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
+        const [xpLocal, ratingsVal, top3Val, profileVal, lists] = await Promise.all([
+          loadData(USER_KEYS.xp),
+          loadData(USER_KEYS.ratings),
+          loadData(USER_KEYS.top3),
+          loadData(USER_KEYS.profile),
+          loadData(USER_KEYS.lists),
         ]);
+        if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
+        setXp(xpLocal ?? 0);
+        setRatings(Array.isArray(ratingsVal) ? ratingsVal : []);
+        setTop3(Array.isArray(top3Val) ? top3Val : []);
+        setPseudo(profileVal?.pseudo ?? 'PSEUDO');
+        setAvatarUri(profileVal?.avatarUri ?? null);
+        setLastPseudoChange(profileVal?.lastPseudoChange ?? null);
+        setGameLists(Array.isArray(lists) ? lists : []);
+        profileLoadedRef.current = true;
+        profileLoadedUidRef.current = expectedUid;
+        lastProfileLoadAtRef.current = Date.now();
+      } catch (error) {
+        console.warn('[Profile] Failed to load profile data:', error instanceof Error ? error.message : error);
       }
-      if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
-      const [xpLocal, ratingsVal, top3Val, profileVal, lists] = await Promise.all([
-        loadData(USER_KEYS.xp),
-        loadData(USER_KEYS.ratings),
-        loadData(USER_KEYS.top3),
-        loadData(USER_KEYS.profile),
-        loadData(USER_KEYS.lists),
-      ]);
-      if ((auth.currentUser?.uid ?? null) !== expectedUid) return;
-      setXp(xpLocal ?? 0);
-      setRatings(Array.isArray(ratingsVal) ? ratingsVal : []);
-      setTop3(Array.isArray(top3Val) ? top3Val : []);
-      setPseudo(profileVal?.pseudo ?? 'PSEUDO');
-      setAvatarUri(profileVal?.avatarUri ?? null);
-      setLastPseudoChange(profileVal?.lastPseudoChange ?? null);
-      setGameLists(Array.isArray(lists) ? lists : []);
-      profileLoadedRef.current = true;
-    } catch (error) {
-      console.warn('[Profile] Failed to load profile data:', error instanceof Error ? error.message : error);
-    }
+    })();
+    profileLoadPromiseRef.current = task.finally(() => {
+      profileLoadPromiseRef.current = null;
+    });
+    return profileLoadPromiseRef.current;
   }, []);
 
 
-  // Attendre la restauration cloud avant d’afficher le profil (évite le flash du top3 vide)
+  // Restore only when this eagerly-mounted native tab is actually opened.
   const [restoring, setRestoring] = useState(true);
-  useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged((user) => {
-      const requestId = ++restoreRequestRef.current;
-      profileLoadedRef.current = false;
-      if (user && !user.isAnonymous) {
-        setRestoring(true);
-        (async () => {
-          await loadProfileData();
-          if (restoreRequestRef.current === requestId) setRestoring(false);
-        })();
-      } else {
-        setRestoring(false);
-      }
-    });
-    return unsubscribe;
-  }, [loadProfileData]);
 
-  const loadSteamLibrary = useCallback(async () => {
+  const loadSteamLinkStatus = useCallback(async () => {
     const steamData = await loadData(USER_KEYS.steamId);
     const linked = Boolean(steamData?.steamId);
     setSteamLinked(linked);
+    const nextSteamId = steamData?.steamId ?? null;
+    if (nextSteamId !== steamIdRef.current) {
+      steamIdRef.current = nextSteamId;
+      steamLibraryLoadedRef.current = false;
+      setSteamGames([]);
+      setSteamLoadError(false);
+    }
+    return nextSteamId;
+  }, []);
+
+  const loadSteamLibrary = useCallback(async () => {
+    if (steamLibraryLoadedRef.current || steamLoading) return;
+    setSteamLoading(true);
+    const steamId = await loadSteamLinkStatus();
     setSteamLoadError(false);
-    if (!steamData?.steamId) {
+    if (!steamId) {
       setSteamGames([]);
       setSteamLoading(false);
       return;
     }
 
-    setSteamLoading(true);
     try {
-      const games = await getSteamOwnedGames(steamData.steamId);
+      const games = await getSteamOwnedGames(steamId);
       setSteamGames(games.sort((a, b) => b.playtime_forever - a.playtime_forever));
+      steamLibraryLoadedRef.current = true;
     } catch (error) {
       console.warn('[Profile] Failed to load Steam library:', error instanceof Error ? error.message : error);
       setSteamGames([]);
       setSteamLoadError(true);
-      setSteamExpanded(true);
     } finally {
       setSteamLoading(false);
     }
-  }, []);
+  }, [loadSteamLinkStatus, steamLoading]);
+
+  const toggleSteamLibrary = useCallback(() => {
+    setSteamExpanded((expanded) => {
+      const next = !expanded;
+      if (next) void loadSteamLibrary();
+      return next;
+    });
+  }, [loadSteamLibrary]);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       (async () => {
-        if (active) await loadProfileData();
-        if (active) await loadSteamLibrary();
+        const currentUid = auth.currentUser?.uid ?? null;
+        const shouldReload = !profileLoadedRef.current
+          || profileLoadedUidRef.current !== currentUid
+          || Date.now() - lastProfileLoadAtRef.current > 2 * 60 * 1000;
+        if (shouldReload) {
+          setRestoring(true);
+          await loadProfileData();
+        }
+        if (active) {
+          setRestoring(false);
+          await loadSteamLinkStatus();
+        }
       })();
       return () => { active = false; };
-    }, [loadProfileData, loadSteamLibrary])
+    }, [loadProfileData, loadSteamLinkStatus])
   );
 
   const rank = getRank(xp);
@@ -172,6 +208,10 @@ export default function ProfileScreen() {
 
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const isRatedGame = useMemo(() => createGameIdentityMatcher(ratings), [ratings]);
+  const unratedSteamGames = useMemo(
+    () => steamGames.filter((game) => !isRatedGame(game)),
+    [steamGames, isRatedGame]
+  );
 
 
 
@@ -195,6 +235,14 @@ export default function ProfileScreen() {
       : sortedRatings,
     [sortedRatings, ratingQueryNorm]
   );
+  const visibleFilteredRatings = useMemo(
+    () => filteredRatings.slice(0, visibleRatingsCount),
+    [filteredRatings, visibleRatingsCount]
+  );
+
+  useEffect(() => {
+    setVisibleRatingsCount(20);
+  }, [ratingQuery, sortKey, ratings.length]);
 
   const [pseudoError, setPseudoError] = useState('');
   const [savingPseudo, setSavingPseudo] = useState(false);
@@ -236,6 +284,10 @@ export default function ProfileScreen() {
     if (!shareCardRef.current) return;
     setSharingImage(true);
     try {
+      const [{ captureRef }, Sharing] = await Promise.all([
+        import('react-native-view-shot'),
+        import('expo-sharing'),
+      ]);
       const uri = await captureRef(shareCardRef, { format: 'png', quality: 0.95 });
       setSharingImage(false);
       if (Platform.OS === 'web') {
@@ -250,6 +302,7 @@ export default function ProfileScreen() {
   };
 
   const pickAvatar = async () => {
+    const ImagePicker = await import('expo-image-picker');
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') return;
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -262,6 +315,7 @@ export default function ProfileScreen() {
       const uri = result.assets[0].uri;
       let finalAvatarUri: string;
       try {
+        const ImageManipulator = await import('expo-image-manipulator');
         // Resize to 200x200 and encode as base64 — no Firebase Storage needed
         const manipulated = await ImageManipulator.manipulateAsync(
           uri,
@@ -285,23 +339,33 @@ export default function ProfileScreen() {
   // Wait for restoration: intermediate defaults could otherwise erase a real top 3.
   useEffect(() => {
     if (!profileLoadedRef.current || restoring) return;
-    const uid = auth.currentUser?.uid;
-    const sync = async () => {
-      if (!uid || auth.currentUser?.uid !== uid) return;
-      const allowXpDecrease = (await loadData(USER_KEYS.profileXpDecreasePending)) === true;
-      const synced = await syncPublicProfile(
-        pseudo ?? 'PSEUDO',
-        avatarUri ?? null,
-        xp ?? 0,
-        top3 ?? [],
-        { allowXpDecrease }
-      );
-      if (!synced) console.warn('[Profile] Public profile sync is pending; local data is preserved.');
-      if (synced && allowXpDecrease) await removeData(USER_KEYS.profileXpDecreasePending);
+    if (publicSyncTimerRef.current) clearTimeout(publicSyncTimerRef.current);
+    publicSyncTimerRef.current = setTimeout(() => {
+      publicSyncTimerRef.current = null;
+      const uid = auth.currentUser?.uid;
+      const sync = async () => {
+        if (!uid || auth.currentUser?.uid !== uid) return;
+        const allowXpDecrease = (await loadData(USER_KEYS.profileXpDecreasePending)) === true;
+        const synced = await syncPublicProfile(
+          pseudo ?? 'PSEUDO',
+          avatarUri ?? null,
+          xp ?? 0,
+          top3 ?? [],
+          { allowXpDecrease }
+        );
+        if (!synced) console.warn('[Profile] Public profile sync is pending; local data is preserved.');
+        if (synced && allowXpDecrease) await removeData(USER_KEYS.profileXpDecreasePending);
+      };
+      profileSyncQueueRef.current = profileSyncQueueRef.current
+        .then(sync)
+        .catch((error) => console.warn('[Profile] Failed to sync public profile:', error));
+    }, 750);
+    return () => {
+      if (publicSyncTimerRef.current) {
+        clearTimeout(publicSyncTimerRef.current);
+        publicSyncTimerRef.current = null;
+      }
     };
-    profileSyncQueueRef.current = profileSyncQueueRef.current
-      .then(sync)
-      .catch((error) => console.warn('[Profile] Failed to sync public profile:', error));
   }, [pseudo, avatarUri, xp, top3, restoring]);
 
   if (restoring) {
@@ -339,7 +403,7 @@ export default function ProfileScreen() {
               <Text style={styles.shareCardBrand}>V·SCORE</Text>
               <View style={styles.shareCardAvatar}>
                 {avatarUri && !avatarUri.startsWith('blob:') ? (
-                  <Image source={{ uri: avatarUri }} style={styles.shareCardAvatarImg} />
+                  <Image source={{ uri: avatarUri }} style={styles.shareCardAvatarImg} cachePolicy="memory-disk" />
                 ) : (
                   <View style={[styles.shareCardAvatarImg, { backgroundColor: rank.color + '44', alignItems: 'center', justifyContent: 'center' }]}>
                     <Text style={{ fontSize: 36 }}>🎮</Text>
@@ -348,7 +412,7 @@ export default function ProfileScreen() {
               </View>
               <Text style={styles.shareCardPseudo}>{pseudo}</Text>
               <View style={styles.shareCardRankRow}>
-                <Image source={rank.image} style={styles.shareCardRankImg} />
+                <Image source={rank.image} style={styles.shareCardRankImg} cachePolicy="memory-disk" />
                 <Text style={[styles.shareCardRankName, { color: rank.color }]}>{rank.name.toUpperCase()}</Text>
               </View>
               <Text style={styles.shareCardXP}>{xp} XP</Text>
@@ -358,7 +422,7 @@ export default function ProfileScreen() {
                   {top3.map((g, i) => (
                     <View key={i} style={styles.shareCardGame}>
                       {g.background_image ? (
-                        <Image source={{ uri: g.background_image }} style={styles.shareCardGameImg} />
+                        <Image source={{ uri: g.background_image }} style={styles.shareCardGameImg} cachePolicy="memory-disk" />
                       ) : (
                         <View style={[styles.shareCardGameImg, { backgroundColor: '#333' }]} />
                       )}
@@ -447,7 +511,7 @@ export default function ProfileScreen() {
         <View style={styles.profileCenter}>
           <TouchableOpacity style={[styles.avatarWrap, { borderColor: rank.color }]} onPress={pickAvatar} activeOpacity={0.8}>
             {avatarUri && !avatarUri.startsWith('blob:') ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+                  <Image source={{ uri: avatarUri }} style={styles.avatarImage} cachePolicy="memory-disk" />
             ) : (
               <View style={styles.avatarPlaceholder}>
                 <Text style={styles.avatarEmoji}>🎮</Text>
@@ -461,7 +525,7 @@ export default function ProfileScreen() {
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.rankRow} onPress={() => setRankModalVisible(true)}>
-            <Image source={rank.image} style={styles.rankBadgeSmall} />
+            <Image source={rank.image} style={styles.rankBadgeSmall} cachePolicy="memory-disk" />
             <Text style={[styles.rankName, { color: rank.color }]}>{rank.name.toUpperCase()}</Text>
           </TouchableOpacity>
         </View>
@@ -521,7 +585,7 @@ export default function ProfileScreen() {
           if (game) {
             return (
               <TouchableOpacity key={i} style={styles.top3Card} onPress={() => router.push(`/rank/${game.id}` as any)} activeOpacity={0.85}>
-                <Image source={{ uri: game.background_image }} style={styles.top3Cover} />
+                <Image source={{ uri: game.background_image }} style={styles.top3Cover} cachePolicy="memory-disk" />
                 <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={styles.top3Gradient} />
                 <Text style={styles.top3Name} numberOfLines={2}>{game.name}</Text>
               </TouchableOpacity>
@@ -566,10 +630,12 @@ export default function ProfileScreen() {
       {/* Steam Library */}
       {steamLinked && (
         <View style={styles.steamSection}>
-          <TouchableOpacity style={styles.steamHeader} onPress={() => setSteamExpanded(!steamExpanded)} activeOpacity={0.7}>
+          <TouchableOpacity style={styles.steamHeader} onPress={toggleSteamLibrary} activeOpacity={0.7}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Ionicons name="logo-steam" size={18} color={colors.text} />
-              <Text style={styles.steamTitle}>Steam ({steamGames.filter((game) => !isRatedGame(game)).length})</Text>
+              <Text style={styles.steamTitle}>
+                Steam{steamLibraryLoadedRef.current ? ` (${unratedSteamGames.length})` : ''}
+              </Text>
             </View>
             <Ionicons name={steamExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textSecondary} />
           </TouchableOpacity>
@@ -584,16 +650,15 @@ export default function ProfileScreen() {
                   </TouchableOpacity>
                 </View>
               )}
-              {!steamLoading && !steamLoadError && steamGames.filter((game) => !isRatedGame(game)).length === 0 && (
+              {!steamLoading && !steamLoadError && steamLibraryLoadedRef.current && unratedSteamGames.length === 0 && (
                 <Text style={styles.steamStatus}>{t.profileSteamEmpty}</Text>
               )}
-              {steamGames
-                .filter((game) => !isRatedGame(game))
+              {unratedSteamGames
                 .slice(0, 50)
                 .map((game) => (
                   <View key={game.appid} style={styles.steamGameRow}>
                     {game.img_icon_url ? (
-                      <Image source={{ uri: game.img_icon_url }} style={styles.steamGameIcon} />
+                      <Image source={{ uri: game.img_icon_url }} style={styles.steamGameIcon} cachePolicy="memory-disk" />
                     ) : (
                       <View style={[styles.steamGameIcon, { backgroundColor: colors.background }]} />
                     )}
@@ -664,7 +729,7 @@ export default function ProfileScreen() {
                 activeOpacity={0.85}
               >
                 {item.gameImage ? (
-                  <Image source={{ uri: item.gameImage }} style={styles.listCardCover} />
+                  <Image source={{ uri: item.gameImage }} style={styles.listCardCover} cachePolicy="memory-disk" recyclingKey={`list-${item.gameId}`} />
                 ) : (
                   <View style={[styles.listCardCover, { backgroundColor: colors.backgroundSecondary }]} />
                 )}
@@ -716,7 +781,7 @@ export default function ProfileScreen() {
         <Text style={styles.emptyText}>{t.profileNoResultsFor(ratingQuery)}</Text>
       ) : (
         <View style={styles.grid}>
-          {filteredRatings.map((game, i) => {
+          {visibleFilteredRatings.map((game, i) => {
             const meta = game.metacritic;
             const metaColor = meta >= 75 ? '#6FCF97' : meta >= 50 ? '#F39C12' : '#E74C3C';
             return (
@@ -727,7 +792,7 @@ export default function ProfileScreen() {
                 activeOpacity={0.85}
               >
                 {game.background_image ? (
-                  <Image source={{ uri: game.background_image }} style={styles.cover} />
+                  <Image source={{ uri: game.background_image }} style={styles.cover} cachePolicy="memory-disk" recyclingKey={`rating-${game.id}`} />
                 ) : (
                   <View style={[styles.cover, { backgroundColor: colors.backgroundSecondary }]} />
                 )}
@@ -747,6 +812,16 @@ export default function ProfileScreen() {
             );
           })}
         </View>
+      )}
+      {filteredRatings.length > visibleRatingsCount && (
+        <TouchableOpacity
+          style={styles.showMoreBtn}
+          onPress={() => setVisibleRatingsCount((count) => count + 20)}
+        >
+          <Text style={styles.showMoreText}>
+            {t.profileShowMore(Math.min(20, filteredRatings.length - visibleRatingsCount))}
+          </Text>
+        </TouchableOpacity>
       )}
       </ScrollView>
     </View>
@@ -858,6 +933,8 @@ const makeStyles = (c: any) => StyleSheet.create({
   cardName: { position: 'absolute', bottom: 0, left: 0, right: 0, color: '#FFFFFF', fontSize: 11, fontWeight: '700', padding: 8 },
   commentBubble: { position: 'absolute', bottom: 26, right: 8, width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: c.textSecondary, textAlign: 'center', marginVertical: 20, marginHorizontal: 20 },
+  showMoreBtn: { alignSelf: 'center', marginTop: 18, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 18, backgroundColor: c.backgroundSecondary },
+  showMoreText: { color: c.primary, fontSize: 13, fontWeight: '800' },
 
   // Lists
   listTabPill: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: c.backgroundSecondary, flexDirection: 'row', alignItems: 'center', gap: 6 },

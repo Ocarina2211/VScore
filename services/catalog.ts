@@ -304,7 +304,11 @@ export const fetchRecentGames = async (page = 1, pageSize = 20) => {
       ordering: '-released',
     }, error);
   }
-  const raw = (data.results ?? []).filter((g: any) => (g.added ?? 0) >= 5);
+  // `added` used to be RAWG's user-add count. With the IGDB-backed catalog it
+  // is derived from ratings/hypes, so recent games commonly have a value below
+  // 5 even though they are valid releases. Filtering them out made this whole
+  // section appear empty.
+  const raw = data.results ?? [];
 
   // 70% recency (rank in release-sorted list) + 30% popularity (normalized added count)
   const maxAdded = Math.max(...raw.map((g: any) => g.added ?? 0), 1);
@@ -430,7 +434,10 @@ export const fetchSimilarGames = async (id: number): Promise<any[]> => {
  * - If no ratings: returns top critic-rated games (fallback).
  * - Otherwise: finds the top genre from highly-rated games and returns similar games the user hasn't rated yet.
  */
-export const fetchRecommendedGames = async (
+const recommendedCache = new Map<string, { value: { results: any[]; isPersonalized: boolean; genreLabel: string }; expiresAt: number }>();
+const recommendedInFlight = new Map<string, Promise<{ results: any[]; isPersonalized: boolean; genreLabel: string }>>();
+
+const fetchRecommendedGamesUncached = async (
   ratings: { id: number; general?: number; graphics?: number; gameplay?: number; name?: string }[]
 ): Promise<{ results: any[]; isPersonalized: boolean; genreLabel: string }> => {
   if (ratings.length === 0) {
@@ -552,6 +559,34 @@ export const fetchRecommendedGames = async (
   }
 
   return { results: pool.slice(0, 20), isPersonalized: true, genreLabel };
+};
+
+/**
+ * Recommendations are deterministic for a given set of ratings during one
+ * day. Reuse the result when Discover and another caller request it again.
+ */
+export const fetchRecommendedGames = async (
+  ratings: { id: number; general?: number; graphics?: number; gameplay?: number; name?: string }[]
+): Promise<{ results: any[]; isPersonalized: boolean; genreLabel: string }> => {
+  const day = new Date().toISOString().slice(0, 10);
+  const signature = JSON.stringify(ratings
+    .map((rating) => [rating.id, rating.general ?? 0, rating.graphics ?? 0, rating.gameplay ?? 0, rating.name ?? ''])
+    .sort((a, b) => Number(a[0]) - Number(b[0])));
+  const key = `${day}:${signature}`;
+  const cached = recommendedCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const inFlight = recommendedInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const request = fetchRecommendedGamesUncached(ratings)
+    .then((value) => {
+      if (recommendedCache.size > 12) recommendedCache.clear();
+      recommendedCache.set(key, { value, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+      return value;
+    })
+    .finally(() => recommendedInFlight.delete(key));
+  recommendedInFlight.set(key, request);
+  return request;
 };
 
 /**

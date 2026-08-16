@@ -10,6 +10,7 @@ type PermissionResult = {
 };
 
 type NotificationModule = typeof import('expo-notifications');
+let notificationModuleRequest: Promise<NotificationModule | null> | null = null;
 
 export const INACTIVITY_REMINDER_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -27,11 +28,10 @@ function canUseNativeNotifications() {
 
 async function getNotifications(): Promise<NotificationModule | null> {
   if (!canUseNativeNotifications()) return null;
-  try {
-    return await import('expo-notifications');
-  } catch {
-    return null;
+  if (!notificationModuleRequest) {
+    notificationModuleRequest = import('expo-notifications').catch(() => null);
   }
+  return notificationModuleRequest;
 }
 
 export async function configureNotificationHandler() {

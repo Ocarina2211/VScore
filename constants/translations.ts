@@ -138,6 +138,7 @@ export type Translations = {
   profileSortTitle: string;
   profileNoRatings: string;
   profileNoResultsFor: (query: string) => string;
+  profileShowMore: (count: number) => string;
   profileSteamUnavailable: string;
   profileSteamEmpty: string;
   profileShareBtn: string;
@@ -473,6 +474,7 @@ const en: Translations = {
   profileSteamUnavailable: 'Your Steam library is temporarily unavailable. Please try again later.',
   profileSteamEmpty: 'No games available to import. Check that your Steam game details are public.',
   profileNoResultsFor: (query) => `No results for "${query}"`,
+  profileShowMore: (count) => `Show ${count} more`,
   profileShareBtn: 'Share as image',
   profileCriteriaTitle: 'Taste profile',
   profileStrongest: 'Strength',
@@ -830,6 +832,7 @@ const fr: Translations = {
   profileSteamUnavailable: 'Ta bibliothèque Steam est temporairement indisponible. Réessaie plus tard.',
   profileSteamEmpty: 'Aucun jeu à importer. Vérifie que les détails de tes jeux Steam sont publics.',
   profileNoResultsFor: (query) => `Aucun résultat pour "${query}"`,
+  profileShowMore: (count) => `Afficher ${count} de plus`,
   profileShareBtn: 'Partager en image',
   profileCriteriaTitle: 'Profil de goûts',
   profileStrongest: 'Point fort',

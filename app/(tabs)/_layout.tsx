@@ -26,7 +26,13 @@ export default function TabLayout() {
       </NativeTabs.Trigger>
 
       <NativeTabs.Trigger name="social">
-        <Icon src={require('../../assets/images/icons/social-icon.png')} />
+        <Icon
+          androidSrc={{
+            default: <VectorIcon family={Ionicons} name="people-outline" />,
+            selected: <VectorIcon family={Ionicons} name="people" />,
+          }}
+          sf={{ default: 'person.2', selected: 'person.2.fill' }}
+        />
         <Label>{t.tabSocial}</Label>
       </NativeTabs.Trigger>
 

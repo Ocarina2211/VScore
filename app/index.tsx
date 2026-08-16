@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Image } from 'expo-image';
 import { getLocales } from 'expo-localization';
 import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useEffect, useRef } from 'react';
-import { Animated, Image, StyleSheet, Text, View } from 'react-native';
+import { Animated, StyleSheet, Text, View } from 'react-native';
 import { Language, TRANSLATIONS } from '../constants/translations';
 import { signInAsGuest } from '../services/auth';
 import { auth } from '../services/firebase';
@@ -11,6 +12,8 @@ import { consumeInitialNotificationRouteAsync, getNotificationPermissionsAsync, 
 import { loadData, USER_KEYS } from '../services/storage';
 
 const STARTUP_ANIMATION_MS = 1500;
+const STARTUP_REMINDER_DELAY_MS = 4_000;
+let reminderStartupTimer: ReturnType<typeof setTimeout> | null = null;
 
 function resolveNotifLanguage(pref: string | null): Language {
   if (pref === 'fr') return 'fr';
@@ -42,12 +45,20 @@ async function scheduleInactivityReminder() {
   } catch {}
 }
 
+function scheduleInactivityReminderAfterStartup() {
+  if (reminderStartupTimer) return;
+  reminderStartupTimer = setTimeout(() => {
+    reminderStartupTimer = null;
+    void scheduleInactivityReminder();
+  }, STARTUP_REMINDER_DELAY_MS);
+}
+
 export default function Index() {
   const router = useRouter();
   const opacity = useRef(new Animated.Value(0)).current;
   const fadeOut = useRef(new Animated.Value(1)).current;
   const logoScale = useRef(new Animated.Value(0.5)).current;
-  const xpWidth = useRef(new Animated.Value(0)).current;
+  const xpProgress = useRef(new Animated.Value(0)).current;
   const dotsOpacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -57,12 +68,12 @@ export default function Index() {
       Animated.timing(opacity, { toValue: 1, duration: 400, useNativeDriver: true }),
     ]).start();
 
-    // Schedule inactivity reminder
-    scheduleInactivityReminder();
+    // Notification I/O is not needed for first paint; schedule it after startup.
+    scheduleInactivityReminderAfterStartup();
 
     // XP bar fills
     const xpTimer = setTimeout(() => {
-      Animated.timing(xpWidth, { toValue: 1, duration: 900, useNativeDriver: false }).start();
+      Animated.timing(xpProgress, { toValue: 1, duration: 900, useNativeDriver: true }).start();
     }, 700);
 
     // Dots appear
@@ -106,9 +117,7 @@ export default function Index() {
       clearTimeout(dotsTimer);
       clearTimeout(timer);
     };
-  }, [dotsOpacity, fadeOut, logoScale, opacity, router, xpWidth]);
-
-  const xpBarWidth = xpWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '72%'] });
+  }, [dotsOpacity, fadeOut, logoScale, opacity, router, xpProgress]);
 
   return (
     <Animated.View style={[styles.container, { opacity: fadeOut }]}>
@@ -117,7 +126,8 @@ export default function Index() {
         <Image
           source={require('../assets/images/Icone/RatecadeLogoTransparent.png')}
           style={styles.logoImage}
-          resizeMode="contain"
+          contentFit="contain"
+          cachePolicy="memory-disk"
         />
       </Animated.View>
 
@@ -128,7 +138,7 @@ export default function Index() {
           <Text style={styles.xpLabel}>LVL 1</Text>
         </View>
         <View style={styles.xpTrack}>
-          <Animated.View style={[styles.xpFill, { width: xpBarWidth }]} />
+          <Animated.View style={[styles.xpFill, { transform: [{ scaleX: xpProgress }] }]} />
         </View>
       </Animated.View>
 
@@ -184,9 +194,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   xpFill: {
+    width: '72%',
     height: '100%',
     borderRadius: 3,
     backgroundColor: '#A855F7',
+    transformOrigin: 'left center',
   },
   dots: {
     flexDirection: 'row',

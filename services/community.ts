@@ -43,6 +43,15 @@ let ratingDeletionSync: Promise<Set<number>> = Promise.resolve(new Set());
 let ratingDeletionStorageQueue: Promise<void> = Promise.resolve();
 let ratingsCloudSync: Promise<boolean> = Promise.resolve(true);
 let listsCloudSync: Promise<boolean> = Promise.resolve(true);
+const GAME_STATS_CACHE_TTL_MS = 2 * 60 * 1000;
+const gameStatsCache = new Map<string, { value: { avg: number; count: number } | null; expiresAt: number }>();
+
+function invalidateGameStatsCache(gameId: number): void {
+  const prefix = `${gameId}:`;
+  for (const key of gameStatsCache.keys()) {
+    if (key.startsWith(prefix)) gameStatsCache.delete(key);
+  }
+}
 
 function storedRatingAverage(rating: Record<string, any> | null | undefined): number {
   if (Number.isFinite(rating?.avg)) return Number(rating?.avg);
@@ -294,6 +303,7 @@ export async function syncRatingToFirestore(payload: RatingPayload): Promise<boo
         });
       }
     });
+    invalidateGameStatsCache(gameId);
     return true;
   } catch (e: any) {
     // Non-blocking — local save already happened
@@ -353,6 +363,7 @@ export async function deleteRatingFromFirestore(gameId: number, expectedUid?: st
         updatedAt: serverTimestamp(),
       });
     });
+    invalidateGameStatsCache(gameId);
     return true;
   } catch {
     return false;
@@ -506,9 +517,19 @@ export async function fetchBatchGameStats(
         nameKey: normalizeGameName(game.name),
       }
     );
-    const gameIds = Array.from(new Set(requested.map((game) => game.id)));
-    const names = Array.from(new Set(requested.flatMap((game) => gameNameLookupCandidates(game.name))));
-    const nameKeys = Array.from(new Set(requested.map((game) => game.nameKey).filter(Boolean)));
+    const cachedResult: Record<number, { avg: number; count: number }> = {};
+    const uncached = requested.filter((game) => {
+      const key = `${game.id}:${game.nameKey}`;
+      const cached = gameStatsCache.get(key);
+      if (!cached || cached.expiresAt <= Date.now()) return true;
+      if (cached.value) cachedResult[game.id] = cached.value;
+      return false;
+    });
+    if (uncached.length === 0) return cachedResult;
+
+    const gameIds = Array.from(new Set(uncached.map((game) => game.id)));
+    const names = Array.from(new Set(uncached.flatMap((game) => gameNameLookupCandidates(game.name))));
+    const nameKeys = Array.from(new Set(uncached.map((game) => game.nameKey).filter(Boolean)));
     const documents = new Map<string, GameStatsDocument>();
 
     // Firestore 'in' supports up to 30 values; chunk each lookup if needed.
@@ -538,15 +559,19 @@ export async function fetchBatchGameStats(
     ]);
 
     const result: Record<number, { avg: number; count: number }> = {};
-    requested.forEach((game) => {
+    uncached.forEach((game) => {
       const matches = matchingStatsDocuments(game, Array.from(documents.values()));
       const combined = combineGameStats(matches);
       // Require at least 3 votes for a meaningful community badge.
       if (combined && combined.count >= 3) {
-        result[game.id] = { avg: combined.avgGeneral ?? combined.avgScore, count: combined.count };
+        const value = { avg: combined.avgGeneral ?? combined.avgScore, count: combined.count };
+        result[game.id] = value;
+        gameStatsCache.set(`${game.id}:${game.nameKey}`, { value, expiresAt: Date.now() + GAME_STATS_CACHE_TTL_MS });
+      } else {
+        gameStatsCache.set(`${game.id}:${game.nameKey}`, { value: null, expiresAt: Date.now() + GAME_STATS_CACHE_TTL_MS });
       }
     });
-    return result;
+    return { ...cachedResult, ...result };
   } catch (e) {
     return {};
   }
@@ -859,12 +884,46 @@ export async function getRelationStatus(otherUid: string): Promise<RelationStatu
 
 /** Helper — fetch profiles and attach to a list of FriendRequest docs */
 async function attachProfiles(requests: FriendRequest[], myUid: string): Promise<void> {
+  const profileRequests = new Map<string, Promise<PublicProfile | null>>();
   await Promise.all(
     requests.map(async (req) => {
       const otherUid = req.fromUid === myUid ? req.toUid : req.fromUid;
-      req.profile = (await getUserPublicProfile(otherUid)) ?? undefined;
+      let profileRequest = profileRequests.get(otherUid);
+      if (!profileRequest) {
+        profileRequest = getUserPublicProfile(otherUid);
+        profileRequests.set(otherUid, profileRequest);
+      }
+      req.profile = (await profileRequest) ?? undefined;
     })
   );
+}
+
+/** Fetch the three relationship lists from one pair of Firestore queries. */
+export async function getFriendOverview(): Promise<{
+  friends: FriendRequest[];
+  sent: FriendRequest[];
+  received: FriendRequest[];
+}> {
+  try {
+    const myUid = getUid();
+    const [sentSnap, receivedSnap] = await Promise.all([
+      getDocs(query(collection(db, 'friend_requests'), where('fromUid', '==', myUid))),
+      getDocs(query(collection(db, 'friend_requests'), where('toUid', '==', myUid))),
+    ]);
+    const outgoing = sentSnap.docs.map((entry) => ({ id: entry.id, ...entry.data() } as FriendRequest));
+    const incoming = receivedSnap.docs.map((entry) => ({ id: entry.id, ...entry.data() } as FriendRequest));
+    const accepted = [...outgoing, ...incoming].filter((request) => request.status === 'accepted');
+    const friends = Array.from(new Map(accepted.map((request) => {
+      const friendUid = request.fromUid === myUid ? request.toUid : request.fromUid;
+      return [friendUid, request] as const;
+    })).values());
+    const sent = outgoing.filter((request) => request.status === 'pending');
+    const received = incoming.filter((request) => request.status === 'pending');
+    await attachProfiles([...friends, ...sent, ...received], myUid);
+    return { friends, sent, received };
+  } catch {
+    return { friends: [], sent: [], received: [] };
+  }
 }
 
 /** Get all accepted friends */
@@ -1298,4 +1357,20 @@ export function syncListsFromFirestore(): Promise<boolean> {
   const run = () => pullListsFromFirestore();
   listsCloudSync = listsCloudSync.then(run, run);
   return listsCloudSync;
+}
+
+// RootLayout and Profile can become active close together. Share one complete
+// pull so both callers reuse the same Firestore work while it is in flight.
+let allCloudSync: Promise<boolean> | null = null;
+
+export function syncAllUserDataFromFirestore(): Promise<boolean> {
+  if (allCloudSync) return allCloudSync;
+  allCloudSync = Promise.all([
+    syncProfileFromFirestore(),
+    syncRatingsFromFirestore(),
+    syncListsFromFirestore(),
+  ]).then((results) => results.every(Boolean)).finally(() => {
+    allCloudSync = null;
+  });
+  return allCloudSync;
 }
